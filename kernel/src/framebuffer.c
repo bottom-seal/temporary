@@ -3,7 +3,8 @@
 #include "types.h"
 #include "vm.h"
 
-#define FB_BASE   0x7f700000UL//this is physical addr
+#define FB_BASE_PA 0x7f700000UL
+#define FB_BASE    phys_to_virt(FB_BASE_PA)
 #define FB_WIDTH  1920
 #define FB_HEIGHT 1080
 #define FB_BPP    4

@@ -1,6 +1,7 @@
 #include "vm.h"
 #include "dt_parse.h"
-
+#include "page_alloc.h"
+#include "str.h"
 static inline unsigned long align_down(unsigned long x)
 {
     return x & ~(PAGE_SIZE - 1);
@@ -185,4 +186,85 @@ void drop_identity_map(void)
     }
 
     asm volatile("sfence.vma zero, zero" ::: "memory");
+}
+
+//basic part 2
+//return the orignal pgd that only has kernel pgd
+unsigned long *kernel_pgd(void)
+{
+    return pgd;
+}
+//copy the kernel part to kernel pgd, all user addr space share same kernel mapping
+unsigned long *create_user_pgd(void)
+{
+    unsigned long *new_pgd = allocate(PAGE_SIZE);
+    if (!new_pgd)
+        return 0;
+
+    memset(new_pgd, 0, PAGE_SIZE);
+
+    /*
+     * Copy upper-half kernel mappings.
+     * Sv39 high-half PAGE_OFFSET index is usually 256.
+     */
+    for (int i = 256; i < 512; i++)
+        new_pgd[i] = pgd[i];
+
+    return new_pgd;
+}
+//need to pass root instead of global pgd
+static void pagewalk(unsigned long *root,
+                     unsigned long va,
+                     unsigned long pa,
+                     unsigned long prot)
+{
+    unsigned long vpn[3];
+
+    vpn[0] = (va >> 12) & 0x1ff;
+    vpn[1] = (va >> 21) & 0x1ff;
+    vpn[2] = (va >> 30) & 0x1ff;
+
+    unsigned long *table = root;
+
+    for (int level = 2; level > 0; level--) {
+        unsigned long *pte = &table[vpn[level]];
+
+        if (!(*pte & PTE_V)) {
+            unsigned long *new_table = allocate(PAGE_SIZE);
+            if (!new_table)
+                return; // later maybe return int for error
+
+            memset(new_table, 0, PAGE_SIZE);
+            *pte = MAKE_PTE(virt_to_phys((unsigned long)new_table), PTE_V);
+        }
+
+        table = (unsigned long *)phys_to_virt(pte_to_pa(*pte));
+    }
+
+    table[vpn[0]] = MAKE_PTE(pa, prot);
+}
+
+void map_pages(unsigned long *root,
+               unsigned long va,
+               unsigned long size,
+               unsigned long pa,
+               unsigned long prot)
+{
+    for (unsigned long off = 0; off < size; off += PAGE_SIZE)
+        pagewalk(root, va + off, pa + off, prot);
+}
+
+//helper for context switch changing satp
+void switch_pgd(unsigned long *next_pgd)
+{
+    if (!next_pgd)
+        next_pgd = kernel_pgd();
+
+    asm volatile(
+        "csrw satp, %0\n"
+        "sfence.vma zero, zero\n"
+        :
+        : "r"(MAKE_SATP(virt_to_phys((unsigned long)next_pgd)))
+        : "memory"
+    );
 }

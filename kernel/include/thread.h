@@ -50,12 +50,14 @@ struct task_struct {
     unsigned long kernel_stack_base;//the base address of the memory allocated for this thread's stack
     unsigned long kernel_sp;//from exercise
 
-    unsigned long user_stack_base;
-    unsigned long user_sp;//reserved for later user process support
+    unsigned long user_stack_base;//kernel VA of physical backing page
+    unsigned long user_sp;//user VA, should be 0x4000000000
 
-    unsigned long user_program_base;
+    //for lab6 
+    unsigned long *pgd;//process page table root
+    unsigned long user_program_base;//user VA, should be 0x0
     unsigned long user_program_size;
-    struct user_image *image;
+    struct user_image *image;//kernel VA of program backing memory
 
     struct task_struct *parent;
     int wait_pid;

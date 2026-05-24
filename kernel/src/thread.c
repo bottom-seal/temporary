@@ -3,7 +3,7 @@
 #include "trap.h"
 #include "uart.h"
 #include "list.h"
-
+#include "vm.h"
 //to solve the problem of sp saved in context switch of idle will be boot stack, treat boot job as a thread task
 static struct task_struct boot_task;
 static struct task_struct *boot_task_ptr = &boot_task;
@@ -260,6 +260,32 @@ struct task_struct *uthread_create(unsigned long user_pc,
         free(task);
         return 0;
     }
+    //each uthread contains its own pgd, it should have shared kernel upper half mapping
+    //and private lower half user mapping
+    task->pgd = create_user_pgd();
+    if (!task->pgd) {
+        free((void *)task->user_stack_base);
+        free((void *)task->kernel_stack_base);
+        free(image);
+        free(task);
+        return 0;
+    }
+    //Map user program
+    //User VA 0x0 -> physical page containing image->base
+    //image->base is a kernel VA, so convert it to PA before putting it to page table
+    map_pages(task->pgd,
+              USER_CODE_BASE,
+              user_program_size,
+              virt_to_phys(image->base),
+              PROT_USER_RX);
+    //Map user stack:
+    //User VA 0x3ffffff000 -> physical page containing task->user_stack_base
+    //Initial user SP should be 0x4000000000.
+     map_pages(task->pgd,
+              USER_STACK_BASE,
+              PAGE_SIZE,
+              virt_to_phys(task->user_stack_base),
+              PROT_USER_RW);
     //a thread must run uthread_create
     parent = get_current();//get the tp of the calling thread
 
@@ -268,9 +294,11 @@ struct task_struct *uthread_create(unsigned long user_pc,
     task->entry = 0;//runs user program, not kernel C function
 
     task->kernel_sp = task->kernel_stack_base + STACK_SIZE;
-    task->user_sp = task->user_stack_base + STACK_SIZE;
+    //user_sp is now a USER VIRTUAL ADDRESS, not kernel allocated address.
+    task->user_sp = USER_STACK_TOP;
     task->image = image;
-    task->user_program_base = image->base;
+    //user_program_base is now user VA 0x0. The actual physical backing memory is image->base.
+    task->user_program_base = USER_CODE_BASE;
     task->user_program_size = image->size;
 
     task->parent = parent;
@@ -319,8 +347,8 @@ int setup_user_context(struct task_struct *task) {
     if (!task || task->type != TASK_USER)//only user thread need to do this
         return -1;
     //uthread_create should return 0 if those would fail, still check
-    if (!task->kernel_stack_base || !task->user_stack_base ||
-        !task->user_program_base || !task->user_sp)
+    //lab 6 : removed !task->user_program_base, as it should now always point to addr 0 in VA
+    if (!task->kernel_stack_base || !task->user_stack_base || !task->user_sp)
         return -1;
 
     //reserve space on the user task’s kernel stack for trap frame
@@ -682,6 +710,9 @@ void schedule(void) {
 
     //next is removed from run_queue, and is running
     next->state = THREAD_RUNNING;
+
+    //context switch also switches satp
+    switch_pgd(next->pgd);
 
     //context switch
     switch_to(prev, next);

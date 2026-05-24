@@ -29,6 +29,14 @@ extern uintptr_t uart_base;
 #define PTE_G  (1UL << 5)
 #define PTE_A  (1UL << 6)
 #define PTE_D  (1UL << 7)
+//basic part 2 USER addr space
+#define USER_CODE_BASE   0x0UL
+#define USER_STACK_BASE  0x3ffffff000UL
+#define USER_STACK_TOP   0x4000000000UL
+
+#define PROT_USER_BASE   (PTE_V | PTE_U | PTE_A | PTE_D)
+#define PROT_USER_RX     (PROT_USER_BASE | PTE_R | PTE_X)
+#define PROT_USER_RW     (PROT_USER_BASE | PTE_R | PTE_W)
 
 #define PROT_KERNEL  (PTE_V | PTE_R | PTE_W | PTE_X | PTE_G | PTE_A | PTE_D)
 #define PROT_MMIO    (PTE_V | PTE_R | PTE_W | PTE_G | PTE_A | PTE_D)
@@ -57,5 +65,11 @@ static inline unsigned long virt_to_phys(unsigned long va)
 
 void setup_vm(unsigned long dtb_pa);
 void drop_identity_map(void);
-
+unsigned long *create_user_pgd(void);
+void map_pages(unsigned long *root,
+               unsigned long va,
+               unsigned long size,
+               unsigned long pa,
+               unsigned long prot);
+void switch_pgd(unsigned long *next_pgd);
 #endif

@@ -3,7 +3,10 @@
 
 #include "list.h"
 
+#ifndef PAGE_SIZE
 #define PAGE_SIZE   4096UL
+#endif
+
 #define MAX_ORDER   10
 //#define MEMORY_BASE 0x10000000UL
 //#define MEMORY_SIZE 0x10000000UL

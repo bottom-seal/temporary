@@ -25,6 +25,75 @@
 #define SYS_SIGRETURN 11
 #define SYS_KILL 12
 
+//helper to copy from user page in kernel mode
+#define SSTATUS_SUM (1UL << 18)
+
+#define ALIGN_UP(x, a) (((x) + (a) - 1) & ~((a) - 1))
+
+static unsigned long user_access_begin(void)
+{
+    unsigned long old;
+    asm volatile("csrrs %0, sstatus, %1"
+                 : "=r"(old)
+                 : "r"(SSTATUS_SUM)
+                 : "memory");
+    return old;
+}
+
+static void user_access_end(unsigned long old)
+{
+    asm volatile("csrw sstatus, %0"
+                 :
+                 : "r"(old)
+                 : "memory");
+}
+
+static int copy_string_from_user(char *dst, const char *src, unsigned long max_len)
+{
+    unsigned long old;
+    unsigned long i;
+
+    if (!dst || !src || max_len == 0)
+        return -1;
+
+    old = user_access_begin();
+
+    for (i = 0; i < max_len - 1; i++) {
+        dst[i] = src[i];
+
+        if (dst[i] == '\0') {
+            user_access_end(old);
+            return 0;
+        }
+    }
+
+    dst[max_len - 1] = '\0';
+
+    user_access_end(old);
+    return 0;
+}
+
+//For uart 
+static char get_user_char(const char *user_ptr)
+{
+    char c;
+    unsigned long old = user_access_begin();
+
+    c = *user_ptr;
+
+    user_access_end(old);
+    return c;
+}
+
+static void put_user_char(char *user_ptr, char c)
+{
+    unsigned long old = user_access_begin();
+
+    *user_ptr = c;
+
+    user_access_end(old);
+}
+
 static void wake_sleeping_task(void *arg) {
     thread_wake((struct task_struct *)arg);
 }
@@ -70,7 +139,13 @@ void handle_syscall(struct pt_regs *regs) {
         irq_enable();
 
         for (i = 0; i < count; i++) {
-            buf[i] = uart_getc();
+            char c = uart_getc();
+
+            /*
+            * Store into user buffer.
+            * buf is a user virtual address.
+            */
+            put_user_char(&buf[i], c);
         }
 
         irq_disable();
@@ -99,76 +174,174 @@ void handle_syscall(struct pt_regs *regs) {
         }
         // only put to software buffer, no need for interrupt(if not full)
         for (i = 0; i < count; i++)
-            uart_putc(buf[i]);
+        {
+            char c = get_user_char(&buf[i]);
+            uart_putc(c);
+        }
 
         uart_flush_tx();
         regs->a0 = (unsigned long)i;
     }
+    //after VM, progame image base and stack base is all the same (not addr kernel assigned)
+    //now should just replace user mappings
     else if (num == SYS_EXEC) {
         //Replace the current user process's program with a new program from initramfs.
         //Keep the same task_struct / pid / kernel stack.
         //Reset the user stack.
         //When returning from the syscall, jump into the new program instead of old program.
         uintptr_t initrd_start = get_initrd_start((const void *)phys_to_virt(boot_dtb_pa));
-        const char *path = (const char *)regs->a0;
+        /*
+        * After VM, regs->a0 is a USER virtual address.
+        * Better copy it into a kernel buffer first.
+        *
+        * If you do not have copy_string_from_user() yet, you can temporarily use:
+        *     const char *path = (const char *)regs->a0;
+        * but it may fault once user pages are mapped with PTE_U.
+        */
+        char kpath[64];
+
         unsigned long new_base;
         unsigned long new_size;
+        unsigned long *new_pgd;
+
         struct user_image *new_image;
         struct user_image *old_image;
+        unsigned long *old_pgd;
+
         struct task_struct *current = get_current();
 
-        if (!current || current->type != TASK_USER || !path) {
-            regs->a0 = (unsigned long)-1;//return
+        if (!current || current->type != TASK_USER) {
+            regs->a0 = (unsigned long)-1;
+            return;
+        }
+        /*
+        * Recommended version.
+        * You need this helper because regs->a0 points to user memory.
+        */
+        //regs->a0 is a virtual user addr, copy to kpath, a kernel buffer
+        //else will fail on page marked PTE_U
+        if (copy_string_from_user(kpath, (const char *)regs->a0, sizeof(kpath)) < 0) {
+            regs->a0 = (unsigned long)-1;
             return;
         }
 
         if (!initrd_start) {
-            regs->a0 = (unsigned long)-1;//return
+            regs->a0 = (unsigned long)-1;
             return;
         }
-        //gets program base, size
+        // gets program base, size
+        // new_base = kernel virtual address of the newly loaded program memory
         if (initrd_load_program((const void *)initrd_start,
-                                path,
-                                &new_base,
+                                kpath,
+                                &new_base,//allocator always return VA now
                                 &new_size) != 0) {
-            regs->a0 = (unsigned long)-1;//return
+            regs->a0 = (unsigned long)-1;
             return;
         }
-        //user image structure for task_struct
+
+        // user image structure for task_struct
         new_image = (struct user_image *)allocate(sizeof(struct user_image));
         if (!new_image) {
             free((void *)new_base);
-            regs->a0 = (unsigned long)-1;//return
+            regs->a0 = (unsigned long)-1;
             return;
         }
-        
+        //new_image->base is just kernel-accessible address of the program backing memory, not user entry
         new_image->base = new_base;
         new_image->size = new_size;
         new_image->refcount = 1;
-        //save old image
+        /*
+        * New for Lab 6:
+        * exec() should create a fresh user address space.
+        *
+        * create_user_pgd() should copy/share the kernel upper-half mappings,
+        * but leave user lower-half empty.
+        */
+        //create user pgd: upper half is kernel mapping ,lower half is user mapping
+        new_pgd = create_user_pgd();
+        if (!new_pgd) {
+            free((void *)new_base);
+            free(new_image);
+            regs->a0 = (unsigned long)-1;
+            return;
+        }
+
+        /*
+        * Map new program:
+        *
+        * user VA 0x0 -> PA of new_base
+        *
+        * new_base is kernel VA, so convert it to PA for the PTE.
+        */
+        //map the VA 0x0 to the user program, permission RX
+        map_pages(new_pgd,
+                USER_CODE_BASE,
+                new_size,
+                virt_to_phys(new_base),//new base is kernel virtual addr
+                PROT_USER_RX);
+
+        /*
+        * Reuse current stack backing page, but clear it.
+        *
+        * current->user_stack_base is still kernel VA of the physical backing page.
+        * User will see it at USER_STACK_BASE.
+        */
+        if (!current->user_stack_base) {
+            free((void *)new_base);
+            free(new_image);
+            // ideally also free new_pgd page-table pages
+            regs->a0 = (unsigned long)-1;
+            return;
+        }
+        //do not free the stack, just clear it
+        memset((void *)current->user_stack_base, 0, STACK_SIZE);
+        //map the new stack to fixed VA
+        map_pages(new_pgd,
+                USER_STACK_BASE,
+                PAGE_SIZE,
+                virt_to_phys(current->user_stack_base),
+                PROT_USER_RW);
+
+        // save old resources for later free
         old_image = current->image;
-        //replace thread field  
+        old_pgd = current->pgd;
+
+        // replace thread fields
         current->image = new_image;
-        current->user_program_base = new_base;
+
+        /*
+        * Important:
+        * These are now USER VIRTUAL addresses.
+        */
+        //after VM, 
+        current->user_program_base = USER_CODE_BASE;//should be VA entry addr
         current->user_program_size = new_size;
-        //old program might be shared, this thread no longer runs old program, refcount--;
+        current->user_sp = USER_STACK_TOP;//should be VA stack top
+
+        //new pgd
+        current->pgd = new_pgd;
+
+        //Since exec() continues in the same task, activate the new page table now.
+        //Otherwise sret would still use the old address space.
+        switch_pgd(current->pgd);
+
+        //check if can free image
         if (old_image) {
             old_image->refcount--;
-            if (old_image->refcount == 0) {//free if no one uses old program
+            if (old_image->refcount == 0) {
                 free((void *)old_image->base);
                 free(old_image);
             }
         }
-        //to run new program, should use clean stack
-        if (current->user_stack_base)
-            memset((void *)current->user_stack_base, 0, STACK_SIZE);
-        //sp back to start of stack                                                                                               
-        current->user_sp = current->user_stack_base + STACK_SIZE;
+
+        //TODO free later 
+        (void)old_pgd;
 
         //Do not return to the old program after exec().
         //Return from trap into the new program entry.
-        regs->sepc = current->user_program_base;
-        regs->sp = current->user_sp;
+        //sepc/sp are USER VIRTUAL addresses now.
+        regs->sepc = USER_CODE_BASE;   // 0x0
+        regs->sp = USER_STACK_TOP;     // 0x4000000000
         regs->tp = (unsigned long)current;
         regs->a0 = 0;
     }
@@ -180,18 +353,54 @@ void handle_syscall(struct pt_regs *regs) {
         struct task_struct *parent = get_current();//caller of fork()
         struct task_struct *child;
         struct pt_regs *child_regs;
-        unsigned long parent_stack_top;
-        unsigned long used;
-        //only user thread with user stack and program should run (system call)
+        unsigned long child_prog;
+        unsigned long prog_alloc_size;
+
+        // Only user thread with user stack and program should run fork().
         if (!parent || parent->type != TASK_USER ||
             !parent->user_stack_base || !parent->image) {
             regs->a0 = (unsigned long)-1;
             return;
         }
-        
-        child = uthread_create(parent->user_program_base,
-                               parent->user_program_size);
+         /*
+        * After VM:
+        *
+        * parent->user_program_base is USER_CODE_BASE, usually 0x0.
+        * It is NOT the real memory address of the program.
+        *
+        * The real program backing memory is:
+        *
+        *     parent->image->base
+        *
+        * So fork must copy from parent->image->base, not parent->user_program_base.
+        */
+        prog_alloc_size = ALIGN_UP(parent->user_program_size, PAGE_SIZE);
+
+        child_prog = (unsigned long)allocate(prog_alloc_size);
+        if (!child_prog) {
+            regs->a0 = (unsigned long)-1;
+            return;
+        }
+
+        memset((void *)child_prog, 0, prog_alloc_size);
+
+        memcpy((void *)child_prog,
+            (void *)parent->image->base,
+            parent->user_program_size);
+        /*
+        * uthread_create() should now:
+        *
+        * 1. create child task_struct
+        * 2. create child->pgd
+        * 3. map child_prog to USER_CODE_BASE, usually VA 0x0
+        * 4. allocate child user stack backing page
+        * 5. map child stack backing page to USER_STACK_BASE
+        * 6. set child->user_program_base = USER_CODE_BASE
+        * 7. set child->user_sp = USER_STACK_TOP
+        */
+        child = uthread_create(child_prog, parent->user_program_size);
         if (!child) {
+            free((void *)child_prog);
             regs->a0 = (unsigned long)-1;
             return;
         }
@@ -202,39 +411,59 @@ void handle_syscall(struct pt_regs *regs) {
         child->pending_signal = 0;
         child->handling_signal = 0;
         child->signal_stack_base = 0;
-        //copy the user program metadata that parent runs
-        if (child->image) {
-            free(child->image);
-            child->image = parent->image;
-            child->image->refcount++;//1 more ref
-            child->user_program_base = child->image->base;
-            child->user_program_size = child->image->size;
-        }
-        //copy whole stack for continue execution 
+         /*
+        * Copy whole user stack backing memory.
+        *
+        * parent->user_stack_base and child->user_stack_base are kernel VAs.
+        * These are the physical backing pages of the user stacks.
+        *
+        * Both parent and child will see their stack at the same user VA:
+        *
+        *     USER_STACK_BASE ~ USER_STACK_TOP
+        */
         memcpy((void *)child->user_stack_base,
-               (void *)parent->user_stack_base,
-               STACK_SIZE);
+            (void *)parent->user_stack_base,
+            STACK_SIZE);
+         /*
+        * Important:
+        *
+        * No stack pointer translation anymore.
+        *
+        * Before VM:
+        *   parent SP pointed inside parent->user_stack_base
+        *   child SP had to be translated into child->user_stack_base
+        *
+        * After VM:
+        *   regs->sp is already a user virtual address.
+        *   The same virtual address is valid in the child's PGD.
+        */
+        child->user_sp = regs->sp;
 
-        parent_stack_top = parent->user_stack_base + STACK_SIZE;
-        if (regs->sp <= parent_stack_top &&
-            regs->sp >= parent->user_stack_base) {
-            used = parent_stack_top - regs->sp;//stack grows down
-            child->user_sp = child->user_stack_base + STACK_SIZE - used;
-        } else {//fallback, doesn't happen
-            child->user_sp = child->user_stack_base + STACK_SIZE;
-        }
-
-        if (setup_user_context(child) != 0) {//prepare trampoline
+        if (setup_user_context(child) != 0) {
             regs->a0 = (unsigned long)-1;
             return;
         }
 
-        child_regs = (struct pt_regs *)child->thread.sp;//copies parent's trap frame, gets same user mode state as parent: sepc, 
+        child_regs = (struct pt_regs *)child->thread.sp;
+        
+        /*
+        * Copy parent's trap frame.
+        *
+        * This gives child the same user-mode state:
+        *   same sepc
+        *   same user sp
+        *   same general registers
+        *
+        * So child resumes as if it returned from the same fork() syscall.
+        */
         memcpy(child_regs, regs, sizeof(struct pt_regs));
-        //those registers is different for child
-        child_regs->sp = child->user_sp;//user stack pointer
-        child_regs->tp = (unsigned long)child;//child's current task current pointer is itself
-        child_regs->a0 = 0;//return 0 on success for child, child see returned pid = 0
+
+        /*
+        * These registers differ for child.
+        */
+        child_regs->sp = regs->sp;              // same user virtual SP
+        child_regs->tp = (unsigned long)child;  // child's current task pointer
+        child_regs->a0 = 0;                     // fork() returns 0 in child
 
         thread_wake(child);//changes the child from waiting/not-runnable to runnable and puts it into the run queue
         //because user thread must set up context before adding to running queue
