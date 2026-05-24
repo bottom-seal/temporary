@@ -1,0 +1,6 @@
+
+# Local AI/tool folders
+.codex/
+.agent/
+**/.codex/
+**/.agent/
