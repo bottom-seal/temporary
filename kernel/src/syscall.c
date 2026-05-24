@@ -231,7 +231,7 @@ void handle_syscall(struct pt_regs *regs) {
         }
         // gets program base, size
         // new_base = kernel virtual address of the newly loaded program memory
-        if (initrd_load_program((const void *)initrd_start,
+        if (initrd_load_program((const void *)phys_to_virt(initrd_start),
                                 kpath,
                                 &new_base,//allocator always return VA now
                                 &new_size) != 0) {
@@ -492,7 +492,9 @@ void handle_syscall(struct pt_regs *regs) {
         unsigned int width = (unsigned int)regs->a1;//2nd argument
         unsigned int height = (unsigned int)regs->a2;//3rd
         //0 on success, -1 on fail
+        unsigned long old = user_access_begin();
         framebuffer_display(bmp_image, width, height);
+        user_access_end(old);
         //scheduler should handle
         //schedule();
     }

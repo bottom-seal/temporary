@@ -61,6 +61,25 @@ void do_trap(struct pt_regs *regs) {
 
         if (irq)
             plic_complete(irq);
+    }  else {
+        debug_uart_puts("trap: unexpected exception scause=");
+        debug_uart_hex(regs->scause);
+        debug_uart_puts(" sepc=");
+        debug_uart_hex(regs->sepc);
+        debug_uart_puts(" stval=");
+        debug_uart_hex(regs->stval);
+        debug_uart_puts(" sstatus=");
+        debug_uart_hex(regs->sstatus);
+        debug_uart_puts(" from_user=");
+        debug_uart_hex((regs->sstatus & (1UL << 8)) == 0);
+        debug_uart_puts("\n");
+
+        if ((regs->sstatus & (1UL << 8)) == 0) {
+            thread_exit_status(-1);
+        } else {
+            while (1)
+                asm volatile("wfi");
+        }
     }
 
     task_run_all();

@@ -33,10 +33,15 @@ extern uintptr_t uart_base;
 #define USER_CODE_BASE   0x0UL
 #define USER_STACK_BASE  0x3ffffff000UL
 #define USER_STACK_TOP   0x4000000000UL
+//signal is broken now, trying to fix it
+#define USER_SIGNAL_STACK_BASE 0x3fffffe000UL
+#define USER_SIGNAL_STACK_TOP  0x3ffffff000UL
 
 #define PROT_USER_BASE   (PTE_V | PTE_U | PTE_A | PTE_D)
 #define PROT_USER_RX     (PROT_USER_BASE | PTE_R | PTE_X)
 #define PROT_USER_RW     (PROT_USER_BASE | PTE_R | PTE_W)
+#define PROT_USER_RWX     (PROT_USER_BASE | PTE_R | PTE_W | PTE_X)
+
 
 #define PROT_KERNEL  (PTE_V | PTE_R | PTE_W | PTE_X | PTE_G | PTE_A | PTE_D)
 #define PROT_MMIO    (PTE_V | PTE_R | PTE_W | PTE_G | PTE_A | PTE_D)
@@ -65,6 +70,7 @@ static inline unsigned long virt_to_phys(unsigned long va)
 
 void setup_vm(unsigned long dtb_pa);
 void drop_identity_map(void);
+unsigned long *kernel_pgd(void);
 unsigned long *create_user_pgd(void);
 void map_pages(unsigned long *root,
                unsigned long va,

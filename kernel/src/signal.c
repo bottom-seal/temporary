@@ -4,6 +4,7 @@
 #include "page_alloc.h"
 #include "uart.h"
 #include "str.h"
+#include "vm.h"
 
 #define SYS_SIGRETURN 11
 
@@ -136,23 +137,39 @@ void handle_signal_if_needed(struct pt_regs *regs) {//passed sp, points to the t
         return;
     }
 
-    //allocate a page to put trampoline code from low addr, and use top as stack
-    signal_stack_base = (unsigned long)allocate(STACK_SIZE);
-    if (!signal_stack_base) {
-        //if cannot create stack, safe fallback is to kill the thread
-        thread_exit_status(0);
-        return;
+    /*
+    * Allocate kernel backing memory for the signal stack/trampoline.
+    *
+    * This is a kernel virtual address.
+    * User mode must NOT see this address directly.
+    */
+    if (!current->signal_stack_base) {
+        signal_stack_base = (unsigned long)allocate(STACK_SIZE);
+        if (!signal_stack_base) {
+            thread_exit_status(0);
+            return;
+        }
+
+        memset((void *)signal_stack_base, 0, STACK_SIZE);
+
+        install_sigreturn_trampoline(signal_stack_base);
+
+        map_pages(current->pgd,
+                USER_SIGNAL_STACK_BASE,
+                PAGE_SIZE,
+                virt_to_phys(signal_stack_base),
+                PROT_USER_RWX);
+
+        current->signal_stack_base = signal_stack_base;
+    } else {
+        signal_stack_base = current->signal_stack_base;
     }
 
-    //initialize to 0
-    memset((void *)signal_stack_base, 0, STACK_SIZE);
-
-    //put the trampoline code at the low addr of allocated page
-    trampoline_addr = install_sigreturn_trampoline(signal_stack_base);//copies the trampoline and run fence
-
-    signal_stack_top = signal_stack_base + STACK_SIZE;
-
-    //align top down to 16 bit aligned, so each saved registers are aligned
+    /*
+    * These are USER VIRTUAL addresses.
+    */
+    trampoline_addr = USER_SIGNAL_STACK_BASE;
+    signal_stack_top = USER_SIGNAL_STACK_TOP;
     signal_stack_top &= ~0xFUL;
 
     //copy whole user trap frame (before handler)

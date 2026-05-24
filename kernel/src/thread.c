@@ -117,6 +117,7 @@ void thread_init(void) {
 
     boot_task.kernel_stack_base = 0;
     boot_task.kernel_sp = 0;
+    boot_task.pgd = kernel_pgd();
     boot_task.user_stack_base = 0;
     boot_task.user_sp = 0;
 
@@ -180,6 +181,7 @@ struct task_struct *kthread_create(void (*entry)(void)) {
     task->kernel_sp = task->kernel_stack_base + STACK_SIZE;//top
     task->user_stack_base = 0;//don't use user space
     task->user_sp = 0;
+    task->pgd = kernel_pgd();
     task->user_program_base = 0;
     task->user_program_size = 0;
     task->image = 0;

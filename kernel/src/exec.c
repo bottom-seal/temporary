@@ -4,6 +4,11 @@
 #include "str.h"
 #include "page_alloc.h"
 
+static int align_page_up(int n)
+{
+    return (n + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+}
+
 static int hextoi(const char *s, int n) {
     int r = 0;
 
@@ -57,13 +62,25 @@ int initrd_load_program(const void *rd,
                 return -1;
             }
 
-            program = allocate((unsigned int)filesize);
+            int alloc_size = align_page_up(filesize);
+
+            program = allocate((unsigned int)alloc_size);
+
             if (!program) {
                 uart_puts("exec: failed to allocate program memory\n");
                 return -1;
             }
 
+            memset(program, 0, (size_t)alloc_size);
             memcpy(program, data, (size_t)filesize);
+
+            if (((unsigned long)program & (PAGE_SIZE - 1)) != 0) {
+                uart_puts("BUG: loaded program not page aligned: ");
+                uart_hex((unsigned long)program);
+                uart_puts("\n");
+                return -1;
+            }
+
             *program_base = (unsigned long)program;
             *program_size = (unsigned long)filesize;
             return 0;
