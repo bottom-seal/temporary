@@ -268,3 +268,72 @@ void switch_pgd(unsigned long *next_pgd)
         : "memory"
     );
 }
+
+//free pgd related stuff
+static void free_pagetable_level(unsigned long *table, int level)
+{
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
+        unsigned long pte = table[i];
+
+        if (!(pte & PTE_V))
+            continue;
+
+        /*
+         * Leaf PTE maps real memory: program, stack, signal stack, etc.
+         * Do NOT free the physical page here.
+         * free_task() already frees those owners separately.
+         */
+        if (is_leaf_pte(pte))
+            continue;
+
+        /*
+         * Non-leaf PTE points to another page-table page.
+         */
+        unsigned long *next =
+            (unsigned long *)phys_to_virt(pte_to_pa(pte));
+
+        if (level > 0)
+            free_pagetable_level(next, level - 1);
+
+        free(next);
+    }
+}
+
+void free_user_pgd(unsigned long *root)
+{
+    if (!root)
+        return;
+
+    /*
+     * Never free the global kernel pgd.
+     */
+    if (root == kernel_pgd())
+        return;
+
+    /*
+     * Only free lower-half user mappings.
+     * Kernel upper-half mappings are copied from kernel pgd entries 256..511.
+     */
+    for (int i = 0; i < 256; i++) {
+        unsigned long pte = root[i];
+
+        if (!(pte & PTE_V))
+            continue;
+
+        if (is_leaf_pte(pte))
+            continue;
+
+        unsigned long *next =
+            (unsigned long *)phys_to_virt(pte_to_pa(pte));
+
+        /*
+         * root -> level 1 -> level 0
+         */
+        free_pagetable_level(next, 1);
+
+        free(next);
+    }
+
+    free(root);
+}
+//no free leaf because they are freed somewhere else

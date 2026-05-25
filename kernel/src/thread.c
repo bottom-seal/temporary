@@ -508,6 +508,10 @@ static void free_task(struct task_struct *task) {
             free((void *)task->signal_stack_base);
             task->signal_stack_base = 0;
         }
+        if (task->pgd) {
+            free_user_pgd(task->pgd);
+            task->pgd = 0;
+        }
     }
 
     free((void *)task->kernel_stack_base);
@@ -860,4 +864,10 @@ int  process_kill(int  pid, int signum) {
         thread_wake(target);
 
     return 0;
+}
+
+//for lab 6 clean up
+void thread_destroy(struct task_struct *task)
+{
+    free_task(task);
 }

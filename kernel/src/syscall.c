@@ -287,6 +287,7 @@ void handle_syscall(struct pt_regs *regs) {
         * User will see it at USER_STACK_BASE.
         */
         if (!current->user_stack_base) {
+            free_user_pgd(new_pgd);
             free((void *)new_base);
             free(new_image);
             // ideally also free new_pgd page-table pages
@@ -335,7 +336,8 @@ void handle_syscall(struct pt_regs *regs) {
         }
 
         //TODO free later 
-        (void)old_pgd;
+        if (old_pgd)
+            free_user_pgd(old_pgd);
 
         //Do not return to the old program after exec().
         //Return from trap into the new program entry.
@@ -440,6 +442,7 @@ void handle_syscall(struct pt_regs *regs) {
         child->user_sp = regs->sp;
 
         if (setup_user_context(child) != 0) {
+             thread_destroy(child);
             regs->a0 = (unsigned long)-1;
             return;
         }

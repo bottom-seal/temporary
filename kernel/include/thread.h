@@ -98,4 +98,6 @@ void thread_test(void);
 long process_stop(long pid);
 
 int  process_kill(int  pid, int signum);
+//lab6
+void thread_destroy(struct task_struct *task);
 #endif

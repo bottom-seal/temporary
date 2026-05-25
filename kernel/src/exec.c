@@ -74,10 +74,19 @@ int initrd_load_program(const void *rd,
             memset(program, 0, (size_t)alloc_size);
             memcpy(program, data, (size_t)filesize);
 
+            /*
+            * We copied user code as data, then later execute it as instructions.
+            * Make sure instruction fetch sees the copied bytes.
+            */
+            asm volatile("fence.i" ::: "memory");
+
             if (((unsigned long)program & (PAGE_SIZE - 1)) != 0) {
                 uart_puts("BUG: loaded program not page aligned: ");
                 uart_hex((unsigned long)program);
                 uart_puts("\n");
+
+                free(program);   // here
+
                 return -1;
             }
 

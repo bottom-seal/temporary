@@ -78,4 +78,5 @@ void map_pages(unsigned long *root,
                unsigned long pa,
                unsigned long prot);
 void switch_pgd(unsigned long *next_pgd);
+void free_user_pgd(unsigned long *root);
 #endif
