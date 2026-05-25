@@ -34,6 +34,7 @@ extern uintptr_t uart_base;
 #define USER_STACK_BASE  0x3ffffff000UL
 #define USER_STACK_TOP   0x4000000000UL
 //signal is broken now, trying to fix it
+//1 page below user stack
 #define USER_SIGNAL_STACK_BASE 0x3fffffe000UL
 #define USER_SIGNAL_STACK_TOP  0x3ffffff000UL
 

@@ -90,7 +90,7 @@ int initrd_load_program(const void *rd,
                 return -1;
             }
 
-            *program_base = (unsigned long)program;
+            *program_base = (unsigned long)program;//now allocate() returns VA
             *program_size = (unsigned long)filesize;
             return 0;
         }

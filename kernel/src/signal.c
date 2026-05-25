@@ -137,37 +137,30 @@ void handle_signal_if_needed(struct pt_regs *regs) {//passed sp, points to the t
         return;
     }
 
-    /*
-    * Allocate kernel backing memory for the signal stack/trampoline.
-    *
-    * This is a kernel virtual address.
-    * User mode must NOT see this address directly.
-    */
+    //we allocated a page below stack
     if (!current->signal_stack_base) {
-        signal_stack_base = (unsigned long)allocate(STACK_SIZE);
+        signal_stack_base = (unsigned long)allocate(STACK_SIZE);//this is kernel VA, need to map to from user VA
         if (!signal_stack_base) {
             thread_exit_status(0);
             return;
         }
 
-        memset((void *)signal_stack_base, 0, STACK_SIZE);
+        memset((void *)signal_stack_base, 0, STACK_SIZE);//init allocated page
 
-        install_sigreturn_trampoline(signal_stack_base);
+        install_sigreturn_trampoline(signal_stack_base);//copy to the bottom of the page
 
         map_pages(current->pgd,
-                USER_SIGNAL_STACK_BASE,
+                USER_SIGNAL_STACK_BASE,//user VA 4kb below user stack base
                 PAGE_SIZE,
-                virt_to_phys(signal_stack_base),
+                virt_to_phys(signal_stack_base),//allocated 1 page, translated to PA for mapping
                 PROT_USER_RWX);
 
-        current->signal_stack_base = signal_stack_base;
+        current->signal_stack_base = signal_stack_base;//store kernel VA mapping to allocated page
     } else {
         signal_stack_base = current->signal_stack_base;
     }
 
-    /*
-    * These are USER VIRTUAL addresses.
-    */
+    //now is fixed in user VA
     trampoline_addr = USER_SIGNAL_STACK_BASE;
     signal_stack_top = USER_SIGNAL_STACK_TOP;
     signal_stack_top &= ~0xFUL;

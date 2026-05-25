@@ -117,6 +117,7 @@ void thread_init(void) {
 
     boot_task.kernel_stack_base = 0;
     boot_task.kernel_sp = 0;
+    //bug fix: sepc was in kernel addr when I print debug in trap.c, kernel threads need to use global pgd, so context switch won't switch to uninitialized thing
     boot_task.pgd = kernel_pgd();
     boot_task.user_stack_base = 0;
     boot_task.user_sp = 0;
@@ -223,7 +224,7 @@ struct task_struct *kthread_create(void (*entry)(void)) {
 //uthread:
 //create: initialize fields, sets up conext, but thread not ready to be queued
 //expects user program is allocated before this function
-struct task_struct *uthread_create(unsigned long user_pc,
+struct task_struct *uthread_create(unsigned long user_pc,///allocted outside, pass program base, this is now VA, maps to PA backing the actual binary
                                    unsigned long user_program_size) {
     struct task_struct *task;
     struct task_struct *parent;
@@ -255,17 +256,17 @@ struct task_struct *uthread_create(unsigned long user_pc,
         return 0;
     }
     //allocate user stack for function call and stuff
-    task->user_stack_base = (unsigned long)allocate(STACK_SIZE);
+    task->user_stack_base = (unsigned long)allocate(STACK_SIZE);//now this store VA mapping to allocated PA
     if (!task->user_stack_base) {
         free((void *)task->kernel_stack_base);
         free(image);
         free(task);
         return 0;
     }
-    //each uthread contains its own pgd, it should have shared kernel upper half mapping
+    //each uthread has its own pgd, it should have shared kernel upper half mapping
     //and private lower half user mapping
-    task->pgd = create_user_pgd();
-    if (!task->pgd) {
+    task->pgd = create_user_pgd();//this function creates a copy of global pgd, with lower half init to 0
+    if (!task->pgd) {//just previously allocated stuff
         free((void *)task->user_stack_base);
         free((void *)task->kernel_stack_base);
         free(image);
@@ -276,18 +277,18 @@ struct task_struct *uthread_create(unsigned long user_pc,
     //User VA 0x0 -> physical page containing image->base
     //image->base is a kernel VA, so convert it to PA before putting it to page table
     map_pages(task->pgd,
-              USER_CODE_BASE,
+              USER_CODE_BASE,//va
               user_program_size,
-              virt_to_phys(image->base),
-              PROT_USER_RX);
+              virt_to_phys(image->base),//image->base is return by allocator, is VA
+              PROT_USER_RX);//program can't be written
     //Map user stack:
     //User VA 0x3ffffff000 -> physical page containing task->user_stack_base
     //Initial user SP should be 0x4000000000.
      map_pages(task->pgd,
-              USER_STACK_BASE,
+              USER_STACK_BASE,//va
               PAGE_SIZE,
-              virt_to_phys(task->user_stack_base),
-              PROT_USER_RW);
+              virt_to_phys(task->user_stack_base),//user stack base is from allocator, is VA
+              PROT_USER_RW);//stack is RW
     //a thread must run uthread_create
     parent = get_current();//get the tp of the calling thread
 
@@ -296,7 +297,7 @@ struct task_struct *uthread_create(unsigned long user_pc,
     task->entry = 0;//runs user program, not kernel C function
 
     task->kernel_sp = task->kernel_stack_base + STACK_SIZE;
-    //user_sp is now a USER VIRTUAL ADDRESS, not kernel allocated address.
+    //user_sp is now a user VA, set to fixed addr, not kernel allocated address.
     task->user_sp = USER_STACK_TOP;
     task->image = image;
     //user_program_base is now user VA 0x0. The actual physical backing memory is image->base.
@@ -508,6 +509,7 @@ static void free_task(struct task_struct *task) {
             free((void *)task->signal_stack_base);
             task->signal_stack_base = 0;
         }
+        //free pgd for user thread
         if (task->pgd) {
             free_user_pgd(task->pgd);
             task->pgd = 0;

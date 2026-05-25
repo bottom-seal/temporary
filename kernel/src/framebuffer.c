@@ -4,7 +4,7 @@
 #include "vm.h"
 
 #define FB_BASE_PA 0x7f700000UL
-#define FB_BASE    phys_to_virt(FB_BASE_PA)
+#define FB_BASE    phys_to_virt(FB_BASE_PA)//use VA
 #define FB_WIDTH  1920
 #define FB_HEIGHT 1080
 #define FB_BPP    4
@@ -50,7 +50,7 @@ static void flush_dcache(void *addr, unsigned long len) {
 int framebuffer_display(unsigned int *bmp_image,
                         unsigned int width,
                         unsigned int height) {
-    unsigned int *fb = (unsigned int *)FB_BASE;
+    unsigned int *fb = (unsigned int *)FB_BASE;//already VA
     unsigned int start_x;
     unsigned int start_y;
 

@@ -26,6 +26,8 @@
 #define SYS_KILL 12
 
 //helper to copy from user page in kernel mode
+//bit 18 in the RISC-V sstatus CSR: Supervisor User Memory access
+//protects kernel from accidently dereferencing a user pointer, turning SUM up enables accessing temporary
 #define SSTATUS_SUM (1UL << 18)
 
 #define ALIGN_UP(x, a) (((x) + (a) - 1) & ~((a) - 1))
@@ -33,7 +35,7 @@
 static unsigned long user_access_begin(void)
 {
     unsigned long old;
-    asm volatile("csrrs %0, sstatus, %1"
+    asm volatile("csrrs %0, sstatus, %1"//csr read and set, read sstatus to %0 for restore, set SUM bit to 1.
                  : "=r"(old)
                  : "r"(SSTATUS_SUM)
                  : "memory");
@@ -42,7 +44,7 @@ static unsigned long user_access_begin(void)
 
 static void user_access_end(unsigned long old)
 {
-    asm volatile("csrw sstatus, %0"
+    asm volatile("csrw sstatus, %0"//write the status before enabling SUM back
                  :
                  : "r"(old)
                  : "memory");
@@ -56,17 +58,17 @@ static int copy_string_from_user(char *dst, const char *src, unsigned long max_l
     if (!dst || !src || max_len == 0)
         return -1;
 
-    old = user_access_begin();
+    old = user_access_begin();//turn on SUM
 
-    for (i = 0; i < max_len - 1; i++) {
+    for (i = 0; i < max_len - 1; i++) {//copy from  user string to kpath buffer
         dst[i] = src[i];
 
         if (dst[i] == '\0') {
-            user_access_end(old);
+            user_access_end(old);//restore sstatus
             return 0;
         }
     }
-
+    //path if exceeding length of 64
     dst[max_len - 1] = '\0';
 
     user_access_end(old);
@@ -74,6 +76,7 @@ static int copy_string_from_user(char *dst, const char *src, unsigned long max_l
 }
 
 //For uart 
+//read 1 user char with SUM enabled
 static char get_user_char(const char *user_ptr)
 {
     char c;
@@ -84,7 +87,7 @@ static char get_user_char(const char *user_ptr)
     user_access_end(old);
     return c;
 }
-
+//write 1 byte char to user VA
 static void put_user_char(char *user_ptr, char c)
 {
     unsigned long old = user_access_begin();
@@ -131,20 +134,18 @@ void handle_syscall(struct pt_regs *regs) {
             return;
         }
 
-        /*
-        * uart_getc() may block and call schedule().
-        * Syscall entry disables interrupt, so enable interrupt while waiting
-        * for UART input. Otherwise RX interrupt may never wake us.
-        */
+        
+        //uart_getc() may block and call schedule().
+        //Syscall entry disables interrupt, so enable interrupt while waiting
+        //for UART input. Otherwise RX interrupt may never wake us.
         irq_enable();
 
         for (i = 0; i < count; i++) {
             char c = uart_getc();
 
-            /*
-            * Store into user buffer.
-            * buf is a user virtual address.
-            */
+            //Store into user buffer.
+            //buf is a user virtual address.
+            //enable SUM to put c in user VA buffer
             put_user_char(&buf[i], c);
         }
 
@@ -174,7 +175,8 @@ void handle_syscall(struct pt_regs *regs) {
         }
         // only put to software buffer, no need for interrupt(if not full)
         for (i = 0; i < count; i++)
-        {
+        {   
+            //enable SUM to get char from user VA buffer
             char c = get_user_char(&buf[i]);
             uart_putc(c);
         }
@@ -190,14 +192,7 @@ void handle_syscall(struct pt_regs *regs) {
         //Reset the user stack.
         //When returning from the syscall, jump into the new program instead of old program.
         uintptr_t initrd_start = get_initrd_start((const void *)phys_to_virt(boot_dtb_pa));
-        /*
-        * After VM, regs->a0 is a USER virtual address.
-        * Better copy it into a kernel buffer first.
-        *
-        * If you do not have copy_string_from_user() yet, you can temporarily use:
-        *     const char *path = (const char *)regs->a0;
-        * but it may fault once user pages are mapped with PTE_U.
-        */
+        //kernel buffer to store *path
         char kpath[64];
 
         unsigned long new_base;
@@ -214,12 +209,7 @@ void handle_syscall(struct pt_regs *regs) {
             regs->a0 = (unsigned long)-1;
             return;
         }
-        /*
-        * Recommended version.
-        * You need this helper because regs->a0 points to user memory.
-        */
-        //regs->a0 is a virtual user addr, copy to kpath, a kernel buffer
-        //else will fail on page marked PTE_U
+        //need to enable SUM to get the string in user VA
         if (copy_string_from_user(kpath, (const char *)regs->a0, sizeof(kpath)) < 0) {
             regs->a0 = (unsigned long)-1;
             return;
@@ -233,7 +223,7 @@ void handle_syscall(struct pt_regs *regs) {
         // new_base = kernel virtual address of the newly loaded program memory
         if (initrd_load_program((const void *)phys_to_virt(initrd_start),
                                 kpath,
-                                &new_base,//allocator always return VA now
+                                &new_base,//allocator always return VA mapping to PA actually alloated for this program
                                 &new_size) != 0) {
             regs->a0 = (unsigned long)-1;
             return;
@@ -246,19 +236,13 @@ void handle_syscall(struct pt_regs *regs) {
             regs->a0 = (unsigned long)-1;
             return;
         }
-        //new_image->base is just kernel-accessible address of the program backing memory, not user entry
+        //new_image->base is just VA of the program backing memory, not user entry, entry is now always 0x0
         new_image->base = new_base;
         new_image->size = new_size;
         new_image->refcount = 1;
-        /*
-        * New for Lab 6:
-        * exec() should create a fresh user address space.
-        *
-        * create_user_pgd() should copy/share the kernel upper-half mappings,
-        * but leave user lower-half empty.
-        */
-        //create user pgd: upper half is kernel mapping ,lower half is user mapping
-        new_pgd = create_user_pgd();
+        //lab 6: exec now also need to create new pgd
+        //create user pgd
+        new_pgd = create_user_pgd();//copies upper half kernel mapping, leaving bottom half empty
         if (!new_pgd) {
             free((void *)new_base);
             free(new_image);
@@ -266,27 +250,15 @@ void handle_syscall(struct pt_regs *regs) {
             return;
         }
 
-        /*
-        * Map new program:
-        *
-        * user VA 0x0 -> PA of new_base
-        *
-        * new_base is kernel VA, so convert it to PA for the PTE.
-        */
-        //map the VA 0x0 to the user program, permission RX
+        //maps new program: VA of code base to actaul allocated PA for the program size
         map_pages(new_pgd,
-                USER_CODE_BASE,
+                USER_CODE_BASE,//0x0
                 new_size,
-                virt_to_phys(new_base),//new base is kernel virtual addr
-                PROT_USER_RX);
+                virt_to_phys(new_base),//new base is kernel VA return from allocate(), need to convert to PA
+                PROT_USER_RX);//program is RX
 
-        /*
-        * Reuse current stack backing page, but clear it.
-        *
-        * current->user_stack_base is still kernel VA of the physical backing page.
-        * User will see it at USER_STACK_BASE.
-        */
-        if (!current->user_stack_base) {
+        //reuse stack
+        if (!current->user_stack_base) {//should not reach here, will if stack allocation fail it shouldn't be a new process
             free_user_pgd(new_pgd);
             free((void *)new_base);
             free(new_image);
@@ -296,25 +268,21 @@ void handle_syscall(struct pt_regs *regs) {
         }
         //do not free the stack, just clear it
         memset((void *)current->user_stack_base, 0, STACK_SIZE);
-        //map the new stack to fixed VA
+        //map the stack to fixed VA, the mapping doesn't exist for the new pgd
         map_pages(new_pgd,
                 USER_STACK_BASE,
                 PAGE_SIZE,
                 virt_to_phys(current->user_stack_base),
                 PROT_USER_RW);
 
-        // save old resources for later free
+        //save old resources for later free
         old_image = current->image;
         old_pgd = current->pgd;
 
-        // replace thread fields
+        //replace thread fields
         current->image = new_image;
 
-        /*
-        * Important:
-        * These are now USER VIRTUAL addresses.
-        */
-        //after VM, 
+        //should be set to user VA
         current->user_program_base = USER_CODE_BASE;//should be VA entry addr
         current->user_program_size = new_size;
         current->user_sp = USER_STACK_TOP;//should be VA stack top
@@ -326,7 +294,7 @@ void handle_syscall(struct pt_regs *regs) {
         //Otherwise sret would still use the old address space.
         switch_pgd(current->pgd);
 
-        //check if can free image
+        //check if can free image, might still shared
         if (old_image) {
             old_image->refcount--;
             if (old_image->refcount == 0) {
@@ -335,17 +303,16 @@ void handle_syscall(struct pt_regs *regs) {
             }
         }
 
-        //TODO free later 
+        //free old pgd
         if (old_pgd)
             free_user_pgd(old_pgd);
 
-        //Do not return to the old program after exec().
-        //Return from trap into the new program entry.
-        //sepc/sp are USER VIRTUAL addresses now.
-        regs->sepc = USER_CODE_BASE;   // 0x0
-        regs->sp = USER_STACK_TOP;     // 0x4000000000
-        regs->tp = (unsigned long)current;
-        regs->a0 = 0;
+        //Return from trap into the new program entry
+        //sepc/sp are USER VIRTUAL addresses now
+        regs->sepc = USER_CODE_BASE;   // 0x0, all user procress use same entry
+        regs->sp = USER_STACK_TOP;     // 0x4000000000, all use same sp
+        regs->tp = (unsigned long)current;// process is still this one
+        regs->a0 = 0;//return 0 on success
     }
     else if (num == SYS_FORK) {
         //Create a new child user task.
@@ -364,18 +331,6 @@ void handle_syscall(struct pt_regs *regs) {
             regs->a0 = (unsigned long)-1;
             return;
         }
-         /*
-        * After VM:
-        *
-        * parent->user_program_base is USER_CODE_BASE, usually 0x0.
-        * It is NOT the real memory address of the program.
-        *
-        * The real program backing memory is:
-        *
-        *     parent->image->base
-        *
-        * So fork must copy from parent->image->base, not parent->user_program_base.
-        */
         prog_alloc_size = ALIGN_UP(parent->user_program_size, PAGE_SIZE);
 
         child_prog = (unsigned long)allocate(prog_alloc_size);
@@ -383,23 +338,14 @@ void handle_syscall(struct pt_regs *regs) {
             regs->a0 = (unsigned long)-1;
             return;
         }
-
+        //just allocate new program image for now
         memset((void *)child_prog, 0, prog_alloc_size);
-
+        //should copy from image->base, actaul VA mapping to allocated PA, not user_program_base
         memcpy((void *)child_prog,
             (void *)parent->image->base,
             parent->user_program_size);
-        /*
-        * uthread_create() should now:
-        *
-        * 1. create child task_struct
-        * 2. create child->pgd
-        * 3. map child_prog to USER_CODE_BASE, usually VA 0x0
-        * 4. allocate child user stack backing page
-        * 5. map child stack backing page to USER_STACK_BASE
-        * 6. set child->user_program_base = USER_CODE_BASE
-        * 7. set child->user_sp = USER_STACK_TOP
-        */
+
+        //uthread_create should use USER_CODE_BASE and USER_STACK_BASE and mapping them
         child = uthread_create(child_prog, parent->user_program_size);
         if (!child) {
             free((void *)child_prog);
@@ -413,32 +359,13 @@ void handle_syscall(struct pt_regs *regs) {
         child->pending_signal = 0;
         child->handling_signal = 0;
         child->signal_stack_base = 0;
-         /*
-        * Copy whole user stack backing memory.
-        *
-        * parent->user_stack_base and child->user_stack_base are kernel VAs.
-        * These are the physical backing pages of the user stacks.
-        *
-        * Both parent and child will see their stack at the same user VA:
-        *
-        *     USER_STACK_BASE ~ USER_STACK_TOP
-        */
-        memcpy((void *)child->user_stack_base,
+        //copy content with kernel VA that backs the memory
+        memcpy((void *)child->user_stack_base,//user_stack_base is the returned kernel VA from allocator, mapping to actual backing memory
             (void *)parent->user_stack_base,
             STACK_SIZE);
-         /*
-        * Important:
-        *
-        * No stack pointer translation anymore.
-        *
-        * Before VM:
-        *   parent SP pointed inside parent->user_stack_base
-        *   child SP had to be translated into child->user_stack_base
-        *
-        * After VM:
-        *   regs->sp is already a user virtual address.
-        *   The same virtual address is valid in the child's PGD.
-        */
+        //child and parent still use user VA stack
+        //modifed so now sp translation
+        //becuse paretn and child share same VA kernel addr, can just resume
         child->user_sp = regs->sp;
 
         if (setup_user_context(child) != 0) {
@@ -449,22 +376,11 @@ void handle_syscall(struct pt_regs *regs) {
 
         child_regs = (struct pt_regs *)child->thread.sp;
         
-        /*
-        * Copy parent's trap frame.
-        *
-        * This gives child the same user-mode state:
-        *   same sepc
-        *   same user sp
-        *   same general registers
-        *
-        * So child resumes as if it returned from the same fork() syscall.
-        */
+        //same sepc, user sp, general resigers
+        //copies parents trap frame so return from trap resume as if return from same fork() syscall
         memcpy(child_regs, regs, sizeof(struct pt_regs));
 
-        /*
-        * These registers differ for child.
-        */
-        child_regs->sp = regs->sp;              // same user virtual SP
+        child_regs->sp = regs->sp;//now use the same sp (VA for stack is same)
         child_regs->tp = (unsigned long)child;  // child's current task pointer
         child_regs->a0 = 0;                     // fork() returns 0 in child
 
