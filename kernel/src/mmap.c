@@ -8,7 +8,56 @@
 
 
 #define ALIGN_UP(x, a) (((x) + (a) - 1) & ~((a) - 1))//only if a = 2^n
+#define ALIGN_DOWN(x, a) ((x) & ~((a) - 1))
 
+//adv part 2
+static struct mmap_region *find_mmap_region(struct task_struct *task,
+                                            unsigned long addr)
+{
+    struct list_head *curr;
+
+    if (!task)
+        return 0;
+
+    for (curr = task->mmap_list.next;
+         curr != &task->mmap_list;
+         curr = curr->next) {
+        struct mmap_region *region =
+            list_entry(curr, struct mmap_region, list);
+
+        if (addr >= region->start &&
+            addr < region->start + region->length)
+            return region;
+    }
+
+    return 0;
+}
+
+static int mmap_access_allowed(struct mmap_region *region,
+                               unsigned long scause_code)
+{
+    if (!region)
+        return 0;
+
+    if (region->prot == MMAP_PROT_NONE)
+        return 0;
+
+    // instruction page fault
+    if (scause_code == 12)
+        return region->prot & MMAP_PROT_EXEC;
+
+    // load page fault
+    if (scause_code == 13)
+        return region->prot & MMAP_PROT_READ;
+
+    // store/AMO page fault
+    if (scause_code == 15)
+        return region->prot & MMAP_PROT_WRITE;
+
+    return 0;
+}
+
+//adv part 1
 static int is_page_aligned(unsigned long addr)
 {
     return (addr & (PAGE_SIZE - 1)) == 0;//check if is page aligned, no change value
@@ -148,51 +197,72 @@ int copy_mmap_regions(struct task_struct *parent,
             list_entry(curr, struct mmap_region, list);
 
         struct mmap_region *dst;
-        unsigned long new_backing;
-        unsigned long pte_flags;
+        unsigned long nr_pages;
 
-        new_backing = (unsigned long)allocate(src->length);//allocate the same region as parent
-        if (!new_backing) {
-            free_mmap_regions(child);//maybe allocated some regions before fail
-            return -1;
-        }
-
-        //copy parent's region to child's region
-        memset((void *)new_backing, 0, src->length);
-        memcpy((void *)new_backing,
-               (void *)src->backing,
-               src->length);
         //allocate for structure
         dst = (struct mmap_region *)allocate(sizeof(struct mmap_region));
         if (!dst) {
-            free((void *)new_backing);
             free_mmap_regions(child);
             return -1;
         }
 
-        pte_flags = mmap_prot_to_pte(src->prot);//mmap_region->prot is user request value, not PTE, need translation
-
-        //make child pgd
-        map_pages(child->pgd,
-                  src->start,
-                  src->length,
-                  virt_to_phys(new_backing),//new_backing is kernel VA
-                  pte_flags);
-
         //copy parent struct, backing is new allocated kernel VA
         dst->start = src->start;
         dst->length = src->length;
-        dst->backing = new_backing;
         dst->prot = src->prot;
         dst->flags = src->flags;
         INIT_LIST_HEAD(&dst->list);
+
+        nr_pages = src->length / PAGE_SIZE;
+
+        dst->pages = (unsigned long *)allocate(nr_pages * sizeof(unsigned long));
+        if (!dst->pages) {
+            free(dst);
+            free_mmap_regions(child);
+            return -1;
+        }
+
+        memset(dst->pages, 0, nr_pages * sizeof(unsigned long));
+
+        for (unsigned long i = 0; i < nr_pages; i++) {
+            unsigned long new_page;
+            unsigned long pte_flags;
+
+            if (!src->pages[i])
+                continue;
+
+            new_page = (unsigned long)allocate(PAGE_SIZE);
+            if (!new_page) {
+                for (unsigned long j = 0; j < i; j++) {
+                    if (dst->pages[j])
+                        free((void *)dst->pages[j]);
+                }
+
+                free(dst->pages);
+                free(dst);
+                free_mmap_regions(child);
+                return -1;
+            }
+
+            memcpy((void *)new_page, (void *)src->pages[i], PAGE_SIZE);
+            dst->pages[i] = new_page;
+
+            pte_flags = mmap_prot_to_pte(src->prot);
+
+            map_pages(child->pgd,
+                      src->start + i * PAGE_SIZE,
+                      PAGE_SIZE,
+                      virt_to_phys(new_page),
+                      pte_flags);
+        }
 
         list_add_tail(&dst->list, &child->mmap_list);//add to child list
     }
 
     return 0;
 }
-
+//part 1 allocate full backing memory, map full immediately
+//part 2 create region metadata, pages[] array, map immediately if MAP_POPULATE is set
 unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
                               unsigned long length,
                               int prot,//prot, could be combination
@@ -201,17 +271,12 @@ unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
     struct task_struct *current = get_current();
     struct mmap_region *region;
     unsigned long user_va;
-    unsigned long backing;
-    unsigned long pte_flags;
+    unsigned long nr_pages;
 
     if (!current || current->type != TASK_USER)
         return (unsigned long)-1;
 
     if (length == 0)
-        return (unsigned long)-1;
-
-    // anonymous only for now.
-    if (!(flags &  MAP_ANONYMOUS)) 
         return (unsigned long)-1;
 
     length = ALIGN_UP(length, PAGE_SIZE);//align to page
@@ -233,38 +298,52 @@ unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
         user_va = find_free_mmap_area(current, length);
     }
 
-    // PROT_NONE is not useful before demand paging.
-    // For now, reject it.
-    if (prot == MMAP_PROT_NONE)
+    region = (struct mmap_region *)allocate(sizeof(struct mmap_region));
+    if (!region)
         return (unsigned long)-1;
-
-    pte_flags = mmap_prot_to_pte(prot);
-
-    backing = (unsigned long)allocate(length);//kernel VA for allocated memory
-    if (!backing)
-        return (unsigned long)-1;
-
-    memset((void *)backing, 0, length);//init 0
-
-    region = (struct mmap_region *)allocate(sizeof(struct mmap_region));//allocate for mmap struct
-    if (!region) {
-        free((void *)backing);
-        return (unsigned long)-1;
-    }
-    //map the va to the backing PA( accessed by kernel VA)
-    map_pages(current->pgd,
-              user_va,
-              length,
-              virt_to_phys(backing),
-              pte_flags);
 
     region->start = user_va;
     region->length = length;
-    region->backing = backing;
     region->prot = prot;
     region->flags = flags;
     INIT_LIST_HEAD(&region->list);
-    //add to user process's mmap list
+
+    nr_pages = region->length / PAGE_SIZE;
+
+    region->pages = (unsigned long *)allocate(nr_pages * sizeof(unsigned long));
+    if (!region->pages) {
+        free(region);
+        return (unsigned long)-1;
+    }
+    memset(region->pages, 0, nr_pages * sizeof(unsigned long));
+
+    if (flags & MAP_POPULATE) {
+        unsigned long pte_flags = mmap_prot_to_pte(prot);
+
+        for (unsigned long i = 0; i < nr_pages; i++) {
+            unsigned long page = (unsigned long)allocate(PAGE_SIZE);
+
+            if (!page) {
+                for (unsigned long j = 0; j < i; j++) {
+                    if (region->pages[j])
+                        free((void *)region->pages[j]);
+                }
+
+                free(region->pages);
+                free(region);
+                return (unsigned long)-1;
+            }
+
+            memset((void *)page, 0, PAGE_SIZE);
+            region->pages[i] = page;
+
+            map_pages(current->pgd,
+                      user_va + i * PAGE_SIZE,
+                      PAGE_SIZE,
+                      virt_to_phys(page),
+                      pte_flags);
+        }
+    }
     list_add_tail(&region->list, &current->mmap_list);
 
     uart_puts("[mmap] va=");
@@ -275,9 +354,82 @@ unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
     uart_hex((unsigned long)prot);
     uart_puts(" flags=");
     uart_hex((unsigned long)flags);
-    uart_puts(" backing=");
-    uart_hex(backing);
     uart_puts("\n");
 
     return user_va;//return user VA for the allocated mmap
+}
+
+
+int mmap_handle_page_fault(struct pt_regs *regs)
+{
+    struct task_struct *current = get_current();
+    struct mmap_region *region;
+    unsigned long addr;
+    unsigned long page_va;
+    unsigned long page_idx;
+    unsigned long nr_pages;
+    unsigned long page;
+    unsigned long pte_flags;
+    unsigned long code;
+
+    if (!current || current->type != TASK_USER)
+        return -1;
+
+    addr = regs->stval;
+    code = regs->scause & 0xfffUL;
+    page_va = ALIGN_DOWN(addr, PAGE_SIZE);
+
+    region = find_mmap_region(current, addr);
+
+    if (!region || !mmap_access_allowed(region, code)) {
+        uart_puts("[Segmentation fault]: Kill Process\n");
+        thread_exit_status(-1);
+        return -1;
+    }
+
+    nr_pages = region->length / PAGE_SIZE;
+    page_idx = (page_va - region->start) / PAGE_SIZE;
+
+    if (page_idx >= nr_pages) {
+        uart_puts("[Segmentation fault]: Kill Process\n");
+        thread_exit_status(-1);
+        return -1;
+    }
+
+    /*
+     * If page already exists but we still faulted,
+     * it is probably a permission fault.
+     * Part 3 CoW may handle this differently.
+     */
+    if (region->pages[page_idx]) {
+        uart_puts("[Segmentation fault]: Kill Process\n");
+        thread_exit_status(-1);
+        return -1;
+    }
+
+    page = (unsigned long)allocate(PAGE_SIZE);
+    if (!page) {
+        uart_puts("[Segmentation fault]: Kill Process\n");
+        thread_exit_status(-1);
+        return -1;
+    }
+
+    memset((void *)page, 0, PAGE_SIZE);
+    region->pages[page_idx] = page;
+
+    pte_flags = mmap_prot_to_pte(region->prot);
+
+    map_pages(current->pgd,
+              page_va,
+              PAGE_SIZE,
+              virt_to_phys(page),
+              pte_flags);
+
+    asm volatile("sfence.vma %0, zero" :: "r"(page_va) : "memory");
+
+    uart_puts("[Translation fault]: ");
+    uart_hex(addr);
+    uart_puts("\n");
+
+    return 0;
 }

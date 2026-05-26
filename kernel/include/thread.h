@@ -4,7 +4,7 @@
 #include "list.h"
 #include "trap.h"
 
-#define STACK_SIZE 0x1000
+#define STACK_SIZE 0x8000
 #define MAX_SIGNAL 32
 
 enum thread_state {
@@ -26,12 +26,16 @@ struct user_image {
 };
 
 struct mmap_region {
-    unsigned long start;       // user VA, user thread use this to access the region
-    unsigned long length;      // size rounded up to page size
-    unsigned long backing;     // kernel VA returned by allocate(), user cannot access through this, use for kernel free() or memory copy
-    int prot; //what prot user asked for
-    int flags; //ANONYMOUS: not backed by file, zeroed pages/ POPULATE: physical page set up immediately or when first accessed
-    struct list_head list; // list node
+    unsigned long start;      // user VA
+    unsigned long length;     // rounded up to PAGE_SIZE
+
+    // pages[i] = kernel VA of allocated physical page
+    // pages[i] = 0 means not allocated yet
+    unsigned long *pages;
+
+    int prot;
+    int flags;
+    struct list_head list;
 };
 
 //Caller-saved registers: If the caller still needs this register after the call, the caller must save it before calling.

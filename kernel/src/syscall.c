@@ -274,7 +274,7 @@ void handle_syscall(struct pt_regs *regs) {
         //map the stack to fixed VA, the mapping doesn't exist for the new pgd
         map_pages(new_pgd,
                 USER_STACK_BASE,
-                PAGE_SIZE,
+                USER_STACK_TOP - USER_STACK_BASE,
                 virt_to_phys(current->user_stack_base),
                 PROT_USER_RW);
 

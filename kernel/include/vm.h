@@ -31,16 +31,16 @@ extern uintptr_t uart_base;
 #define PTE_D  (1UL << 7)
 //basic part 2 USER addr space
 #define USER_CODE_BASE   0x0UL
-#define USER_STACK_BASE  0x3ffffff000UL
 #define USER_STACK_TOP   0x4000000000UL
+#define USER_STACK_BASE  (USER_STACK_TOP - 8 * PAGE_SIZE)
 //signal is broken now, trying to fix it
 //1 page below user stack
-#define USER_SIGNAL_STACK_BASE 0x3fffffe000UL
-#define USER_SIGNAL_STACK_TOP  0x3ffffff000UL
+#define USER_SIGNAL_STACK_TOP  USER_STACK_BASE
+#define USER_SIGNAL_STACK_BASE (USER_SIGNAL_STACK_TOP - 1 * PAGE_SIZE)
 // mmap user region
 // keep it below normal user stack / signal stack
-#define USER_MMAP_BASE 0x1000000000UL
 #define USER_MMAP_TOP  USER_SIGNAL_STACK_BASE
+#define USER_MMAP_BASE 0x1000000000UL
 // mmap prot flags from lab spec
 #define MMAP_PROT_NONE  0
 #define MMAP_PROT_READ  1

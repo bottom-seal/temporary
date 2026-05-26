@@ -5,6 +5,7 @@
 #include "task.h"
 #include "thread.h"
 #include "syscall.h"
+#include "mmap.h"
 
 #define SSTATUS_SIE (1UL << 1)
 
@@ -61,7 +62,13 @@ void do_trap(struct pt_regs *regs) {
 
         if (irq)
             plic_complete(irq);
-    }  else {
+    }
+    else if (!is_interrupt &&
+            from_user &&
+            (code == 12 || code == 13 || code == 15)) {
+        mmap_handle_page_fault(regs);
+    }
+    else {
         //for debug
         debug_uart_puts("debug trap: unexpected exception scause=");
         debug_uart_hex(regs->scause);

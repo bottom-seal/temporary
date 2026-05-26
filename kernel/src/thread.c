@@ -289,7 +289,7 @@ struct task_struct *uthread_create(unsigned long user_pc,///allocted outside, pa
     //Initial user SP should be 0x4000000000.
      map_pages(task->pgd,
               USER_STACK_BASE,//va
-              PAGE_SIZE,
+              USER_STACK_TOP - USER_STACK_BASE,
               virt_to_phys(task->user_stack_base),//user stack base is from allocator, is VA
               PROT_USER_RW);//stack is RW
     //a thread must run uthread_create
@@ -894,8 +894,17 @@ void free_mmap_regions(struct task_struct *task)
 
         list_del(&region->list);
 
-        if (region->backing)//free allocated memoery for region
-            free((void *)region->backing);
+        if (region->pages) {
+            unsigned long nr_pages = region->length / PAGE_SIZE;
+
+            for (unsigned long i = 0; i < nr_pages; i++) {
+                if (region->pages[i])
+                    free((void *)region->pages[i]);
+            }
+
+            free(region->pages);
+        }
+
 
         free(region);//free mmap struct
     }

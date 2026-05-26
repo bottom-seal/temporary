@@ -10,5 +10,7 @@ unsigned long sys_mmap(void *addr,
 
 int copy_mmap_regions(struct task_struct *parent,
                       struct task_struct *child);
+//adv 2 
+int mmap_handle_page_fault(struct pt_regs *regs);
 
 #endif
