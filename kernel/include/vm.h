@@ -37,6 +37,18 @@ extern uintptr_t uart_base;
 //1 page below user stack
 #define USER_SIGNAL_STACK_BASE 0x3fffffe000UL
 #define USER_SIGNAL_STACK_TOP  0x3ffffff000UL
+// mmap user region
+// keep it below normal user stack / signal stack
+#define USER_MMAP_BASE 0x1000000000UL
+#define USER_MMAP_TOP  USER_SIGNAL_STACK_BASE
+// mmap prot flags from lab spec
+#define MMAP_PROT_NONE  0
+#define MMAP_PROT_READ  1
+#define MMAP_PROT_WRITE 2
+#define MMAP_PROT_EXEC  4
+// mmap flags from lab spec
+#define MAP_ANONYMOUS 0x20
+#define MAP_POPULATE  0x8000
 
 #define PROT_USER_BASE   (PTE_V | PTE_U | PTE_A | PTE_D)
 #define PROT_USER_RX     (PROT_USER_BASE | PTE_R | PTE_X)

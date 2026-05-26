@@ -24,6 +24,16 @@ struct user_image {
     unsigned long size;
     int refcount;
 };
+
+struct mmap_region {
+    unsigned long start;       // user VA, user thread use this to access the region
+    unsigned long length;      // size rounded up to page size
+    unsigned long backing;     // kernel VA returned by allocate(), user cannot access through this, use for kernel free() or memory copy
+    int prot; //what prot user asked for
+    int flags; //ANONYMOUS: not backed by file, zeroed pages/ POPULATE: physical page set up immediately or when first accessed
+    struct list_head list; // list node
+};
+
 //Caller-saved registers: If the caller still needs this register after the call, the caller must save it before calling.
 //Callee-saved registers: If the callee uses this register, the callee must restore its old value before returning.
 
@@ -77,6 +87,10 @@ struct task_struct {
     int handling_signal;                      // avoid nested signal handler, if 1 don't enter handler
     struct pt_regs saved_signal_regs;         // original user context, because we need to overwrite fields to jump to handler, and handler would save new regs
     unsigned long signal_stack_base;          // temporary signal stack
+
+    //
+    struct list_head mmap_list;//head of the linked list of mmap regions
+    unsigned long mmap_next;//help with request addr = NULL, need to find next available addr
 };
 
 struct task_struct *get_current(void);
@@ -100,4 +114,5 @@ long process_stop(long pid);
 int  process_kill(int  pid, int signum);
 //lab6
 void thread_destroy(struct task_struct *task);
+void free_mmap_regions(struct task_struct *task);
 #endif

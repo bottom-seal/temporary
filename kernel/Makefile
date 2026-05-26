@@ -29,7 +29,8 @@ SRCS = \
 	src/thread.c \
 	src/syscall.c \
 	src/signal.c \
-	src/vm.c
+	src/vm.c \
+	src/mmap.c
 
 OBJS = $(SRCS:.c=.o)
 OBJS := $(OBJS:.S=.o)

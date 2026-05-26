@@ -62,7 +62,8 @@ void do_trap(struct pt_regs *regs) {
         if (irq)
             plic_complete(irq);
     }  else {
-        debug_uart_puts("trap: unexpected exception scause=");
+        //for debug
+        debug_uart_puts("debug trap: unexpected exception scause=");
         debug_uart_hex(regs->scause);
         debug_uart_puts(" sepc=");
         debug_uart_hex(regs->sepc);

@@ -147,7 +147,9 @@ void thread_init(void) {
     INIT_LIST_HEAD(&boot_task.zombie_list);
     INIT_LIST_HEAD(&boot_task.child_list);
     INIT_LIST_HEAD(&boot_task.sibling_list);
-
+    //lab6
+    INIT_LIST_HEAD(&boot_task.mmap_list);
+    boot_task.mmap_next = USER_MMAP_BASE;
     add_to_all_tasks(&boot_task);
 
     // current task = boot_task
@@ -208,7 +210,8 @@ struct task_struct *kthread_create(void (*entry)(void)) {
     INIT_LIST_HEAD(&task->zombie_list);
     INIT_LIST_HEAD(&task->child_list);
     INIT_LIST_HEAD(&task->sibling_list);
-
+    INIT_LIST_HEAD(&task->mmap_list);
+    task->mmap_next = USER_MMAP_BASE;
     //nr_threads, all_tasks_queue, and run_queue are shared scheduler state.
     flags = irq_save();
 
@@ -325,7 +328,8 @@ struct task_struct *uthread_create(unsigned long user_pc,///allocted outside, pa
     INIT_LIST_HEAD(&task->zombie_list);
     INIT_LIST_HEAD(&task->child_list);
     INIT_LIST_HEAD(&task->sibling_list);
-
+    INIT_LIST_HEAD(&task->mmap_list);
+    task->mmap_next = USER_MMAP_BASE;
     //nr_threads, all_tasks_queue, and parent's child_list are shared task state.
     flags = irq_save();
 
@@ -496,6 +500,7 @@ static void free_task(struct task_struct *task) {
     //only user is allocated user stack,
     //image cnt--, so we know when we can free
     if (task->type == TASK_USER) {
+        free_mmap_regions(task);
         free((void *)task->user_stack_base);
         if (task->image) {
             task->image->refcount--;
@@ -872,4 +877,28 @@ int  process_kill(int  pid, int signum) {
 void thread_destroy(struct task_struct *task)
 {
     free_task(task);
+}
+
+void free_mmap_regions(struct task_struct *task)
+{
+    struct list_head *curr;
+
+    if (!task)
+        return;
+
+    while (!list_empty(&task->mmap_list)) {//remove until list empty
+        struct mmap_region *region;
+
+        curr = task->mmap_list.next;
+        region = list_entry(curr, struct mmap_region, list);
+
+        list_del(&region->list);
+
+        if (region->backing)//free allocated memoery for region
+            free((void *)region->backing);
+
+        free(region);//free mmap struct
+    }
+
+    task->mmap_next = USER_MMAP_BASE;//next possible available back to start
 }

@@ -10,6 +10,7 @@
 #include "exec.h"
 #include "signal.h"
 #include "vm.h"
+#include "mmap.h"
 
 #define SYS_GETPID     0
 #define SYS_UART_READ  1
@@ -24,6 +25,7 @@
 #define SYS_SIGNAL 10
 #define SYS_SIGRETURN 11
 #define SYS_KILL 12
+#define SYS_MMAP 13
 
 //helper to copy from user page in kernel mode
 //bit 18 in the RISC-V sstatus CSR: Supervisor User Memory access
@@ -31,6 +33,7 @@
 #define SSTATUS_SUM (1UL << 18)
 
 #define ALIGN_UP(x, a) (((x) + (a) - 1) & ~((a) - 1))
+
 
 static unsigned long user_access_begin(void)
 {
@@ -278,6 +281,8 @@ void handle_syscall(struct pt_regs *regs) {
         //save old resources for later free
         old_image = current->image;
         old_pgd = current->pgd;
+        
+        free_mmap_regions(current);
 
         //replace thread fields
         current->image = new_image;
@@ -367,6 +372,19 @@ void handle_syscall(struct pt_regs *regs) {
         //modifed so now sp translation
         //becuse paretn and child share same VA kernel addr, can just resume
         child->user_sp = regs->sp;
+
+        /*
+        * Lab 6 mmap:
+        * fork() must also inherit mmap regions.
+        * Without this, the child page table has code + stack only,
+        * so reading mmap address causes scause = 0xd.
+        */
+        if (copy_mmap_regions(parent, child) != 0) {
+            thread_destroy(child);
+            regs->a0 = (unsigned long)-1;
+            return;
+        }
+
 
         if (setup_user_context(child) != 0) {
              thread_destroy(child);
@@ -466,5 +484,13 @@ void handle_syscall(struct pt_regs *regs) {
     else if (num == SYS_KILL) {
         int ret = process_kill((int)regs->a0, (int)regs->a1);
         regs->a0 = (unsigned long)(long)ret;
+    }
+    else if (num == SYS_MMAP) {
+        regs->a0 = sys_mmap(
+            (void *)regs->a0,
+            (unsigned long)regs->a1,
+            (int)regs->a2,
+            (int)regs->a3
+        );
     }
 }
