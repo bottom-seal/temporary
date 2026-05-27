@@ -209,8 +209,12 @@ int copy_mmap_regions(struct task_struct *parent,
         //copy parent struct, backing is new allocated kernel VA
         dst->start = src->start;
         dst->length = src->length;
+        dst->backing = src->backing;
+        dst->file_size = src->file_size;
         dst->prot = src->prot;
         dst->flags = src->flags;
+        dst->type = src->type;
+        dst->pages = 0;
         INIT_LIST_HEAD(&dst->list);
 
         nr_pages = src->length / PAGE_SIZE;
@@ -231,6 +235,33 @@ int copy_mmap_regions(struct task_struct *parent,
             if (!src->pages[i])
                 continue;
 
+            if (src->type == VM_REGION_PROGRAM) {
+                if (retain_page((void *)src->pages[i]) < 0) {
+                    for (unsigned long j = 0; j < i; j++) {
+                        if (dst->pages[j])
+                            free((void *)dst->pages[j]);
+                    }
+
+                    free(dst->pages);
+                    free(dst);
+                    free_mmap_regions(child);
+                    return -1;
+                }
+
+                dst->pages[i] = src->pages[i];
+
+                if (src->prot != MMAP_PROT_NONE) {
+                    pte_flags = mmap_prot_to_pte(src->prot);
+                    map_pages(child->pgd,
+                              src->start + i * PAGE_SIZE,
+                              PAGE_SIZE,
+                              virt_to_phys(src->pages[i]),
+                              pte_flags);
+                }
+
+                continue;
+            }
+
             new_page = (unsigned long)allocate(PAGE_SIZE);
             if (!new_page) {
                 for (unsigned long j = 0; j < i; j++) {
@@ -247,13 +278,14 @@ int copy_mmap_regions(struct task_struct *parent,
             memcpy((void *)new_page, (void *)src->pages[i], PAGE_SIZE);
             dst->pages[i] = new_page;
 
-            pte_flags = mmap_prot_to_pte(src->prot);
-
-            map_pages(child->pgd,
-                      src->start + i * PAGE_SIZE,
-                      PAGE_SIZE,
-                      virt_to_phys(new_page),
-                      pte_flags);
+            if (src->prot != MMAP_PROT_NONE) {
+                pte_flags = mmap_prot_to_pte(src->prot);
+                map_pages(child->pgd,
+                          src->start + i * PAGE_SIZE,
+                          PAGE_SIZE,
+                          virt_to_phys(new_page),
+                          pte_flags);
+            }
         }
 
         list_add_tail(&dst->list, &child->mmap_list);//add to child list
@@ -279,6 +311,12 @@ unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
     if (length == 0)
         return (unsigned long)-1;
 
+    if (!(flags & MAP_ANONYMOUS))
+        return (unsigned long)-1;
+
+    if (prot & ~(MMAP_PROT_READ | MMAP_PROT_WRITE | MMAP_PROT_EXEC))
+        return (unsigned long)-1;
+
     length = ALIGN_UP(length, PAGE_SIZE);//align to page
 
     // For Advanced 1, easiest design:
@@ -298,14 +336,21 @@ unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
         user_va = find_free_mmap_area(current, length);
     }
 
+    if (!user_va)
+        return (unsigned long)-1;
+
     region = (struct mmap_region *)allocate(sizeof(struct mmap_region));
     if (!region)
         return (unsigned long)-1;
 
     region->start = user_va;
     region->length = length;
+    region->backing = 0;
+    region->file_size = 0;
     region->prot = prot;
     region->flags = flags;
+    region->type = VM_REGION_ANON;
+    region->pages = 0;
     INIT_LIST_HEAD(&region->list);
 
     nr_pages = region->length / PAGE_SIZE;
@@ -317,7 +362,7 @@ unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
     }
     memset(region->pages, 0, nr_pages * sizeof(unsigned long));
 
-    if (flags & MAP_POPULATE) {
+    if ((flags & MAP_POPULATE) && prot != MMAP_PROT_NONE) {
         unsigned long pte_flags = mmap_prot_to_pte(prot);
 
         for (unsigned long i = 0; i < nr_pages; i++) {
@@ -343,18 +388,9 @@ unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
                       virt_to_phys(page),
                       pte_flags);
         }
+        asm volatile("sfence.vma zero, zero" ::: "memory");
     }
     list_add_tail(&region->list, &current->mmap_list);
-
-    uart_puts("[mmap] va=");
-    uart_hex(user_va);
-    uart_puts(" len=");
-    uart_hex(length);
-    uart_puts(" prot=");
-    uart_hex((unsigned long)prot);
-    uart_puts(" flags=");
-    uart_hex((unsigned long)flags);
-    uart_puts("\n");
 
     return user_va;//return user VA for the allocated mmap
 }
@@ -415,6 +451,23 @@ int mmap_handle_page_fault(struct pt_regs *regs)
     }
 
     memset((void *)page, 0, PAGE_SIZE);
+
+    if (region->type == VM_REGION_PROGRAM) {
+        unsigned long file_off = page_va - region->start;
+
+        if (file_off < region->file_size) {
+            unsigned long copy_len = region->file_size - file_off;
+
+            if (copy_len > PAGE_SIZE)
+                copy_len = PAGE_SIZE;
+
+            memcpy((void *)page,
+                   (void *)(region->backing + file_off),
+                   copy_len);
+            asm volatile("fence.i" ::: "memory");
+        }
+    }
+
     region->pages[page_idx] = page;
 
     pte_flags = mmap_prot_to_pte(region->prot);
@@ -430,6 +483,53 @@ int mmap_handle_page_fault(struct pt_regs *regs)
     uart_puts("[Translation fault]: ");
     uart_hex(addr);
     uart_puts("\n");
+
+    return 0;
+}
+
+int add_user_region(struct task_struct *task,
+                    unsigned long start,
+                    unsigned long length,
+                    int prot,
+                    int flags,
+                    enum vm_region_type type,
+                    unsigned long backing,
+                    unsigned long file_size)
+{
+    struct mmap_region *region;
+
+    if (!task || !length)
+        return -1;
+
+    length = ALIGN_UP(length, PAGE_SIZE);
+
+    if (start & (PAGE_SIZE - 1))
+        return -1;
+
+    if (prot & ~(MMAP_PROT_READ | MMAP_PROT_WRITE | MMAP_PROT_EXEC))
+        return -1;
+
+    region = (struct mmap_region *)allocate(sizeof(struct mmap_region));
+    if (!region)
+        return -1;
+
+    region->start = start;
+    region->length = length;
+    region->backing = backing;
+    region->file_size = file_size;
+    region->prot = prot;
+    region->flags = flags;
+    region->type = type;
+    region->pages = (unsigned long *)allocate((length / PAGE_SIZE) *
+                                              sizeof(unsigned long));
+    if (!region->pages) {
+        free(region);
+        return -1;
+    }
+    memset(region->pages, 0, (length / PAGE_SIZE) * sizeof(unsigned long));
+
+    INIT_LIST_HEAD(&region->list);
+    list_add_tail(&region->list, &task->mmap_list);
 
     return 0;
 }

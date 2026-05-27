@@ -223,10 +223,10 @@ void handle_syscall(struct pt_regs *regs) {
             return;
         }
         // gets program base, size
-        // new_base = kernel virtual address of the newly loaded program memory
-        if (initrd_load_program((const void *)phys_to_virt(initrd_start),
+        // new_base points into initrd; user pages are copied lazily on faults.
+        if (initrd_find_program((const void *)phys_to_virt(initrd_start),
                                 kpath,
-                                &new_base,//allocator always return VA mapping to PA actually alloated for this program
+                                &new_base,
                                 &new_size) != 0) {
             regs->a0 = (unsigned long)-1;
             return;
@@ -235,7 +235,6 @@ void handle_syscall(struct pt_regs *regs) {
         // user image structure for task_struct
         new_image = (struct user_image *)allocate(sizeof(struct user_image));
         if (!new_image) {
-            free((void *)new_base);
             regs->a0 = (unsigned long)-1;
             return;
         }
@@ -247,41 +246,17 @@ void handle_syscall(struct pt_regs *regs) {
         //create user pgd
         new_pgd = create_user_pgd();//copies upper half kernel mapping, leaving bottom half empty
         if (!new_pgd) {
-            free((void *)new_base);
             free(new_image);
             regs->a0 = (unsigned long)-1;
             return;
         }
 
-        //maps new program: VA of code base to actaul allocated PA for the program size
-        map_pages(new_pgd,
-                USER_CODE_BASE,//0x0
-                new_size,
-                virt_to_phys(new_base),//new base is kernel VA return from allocate(), need to convert to PA
-                PROT_USER_RX);//program is RX
-
-        //reuse stack
-        if (!current->user_stack_base) {//should not reach here, will if stack allocation fail it shouldn't be a new process
-            free_user_pgd(new_pgd);
-            free((void *)new_base);
-            free(new_image);
-            // ideally also free new_pgd page-table pages
-            regs->a0 = (unsigned long)-1;
-            return;
-        }
-        //do not free the stack, just clear it
-        memset((void *)current->user_stack_base, 0, STACK_SIZE);
-        //map the stack to fixed VA, the mapping doesn't exist for the new pgd
-        map_pages(new_pgd,
-                USER_STACK_BASE,
-                USER_STACK_TOP - USER_STACK_BASE,
-                virt_to_phys(current->user_stack_base),
-                PROT_USER_RW);
+        new_image->owned = 0;
 
         //save old resources for later free
         old_image = current->image;
         old_pgd = current->pgd;
-        
+
         free_mmap_regions(current);
 
         //replace thread fields
@@ -295,6 +270,32 @@ void handle_syscall(struct pt_regs *regs) {
         //new pgd
         current->pgd = new_pgd;
 
+        current->user_stack_base = 0;
+        if (add_user_region(current,
+                            USER_CODE_BASE,
+                            ALIGN_UP(new_size, PAGE_SIZE),
+                            MMAP_PROT_READ | MMAP_PROT_EXEC,
+                            0,
+                            VM_REGION_PROGRAM,
+                            new_base,
+                            new_size) < 0 ||
+            add_user_region(current,
+                            USER_STACK_BASE,
+                            USER_STACK_TOP - USER_STACK_BASE,
+                            MMAP_PROT_READ | MMAP_PROT_WRITE,
+                            MAP_ANONYMOUS,
+                            VM_REGION_STACK,
+                            0,
+                            0) < 0) {
+            free_mmap_regions(current);
+            current->image = old_image;
+            current->pgd = old_pgd;
+            free_user_pgd(new_pgd);
+            free(new_image);
+            regs->a0 = (unsigned long)-1;
+            return;
+        }
+
         //Since exec() continues in the same task, activate the new page table now.
         //Otherwise sret would still use the old address space.
         switch_pgd(current->pgd);
@@ -303,7 +304,8 @@ void handle_syscall(struct pt_regs *regs) {
         if (old_image) {
             old_image->refcount--;
             if (old_image->refcount == 0) {
-                free((void *)old_image->base);
+                if (old_image->owned)
+                    free((void *)old_image->base);
                 free(old_image);
             }
         }
@@ -327,36 +329,24 @@ void handle_syscall(struct pt_regs *regs) {
         struct task_struct *parent = get_current();//caller of fork()
         struct task_struct *child;
         struct pt_regs *child_regs;
-        unsigned long child_prog;
-        unsigned long prog_alloc_size;
 
-        // Only user thread with user stack and program should run fork().
-        if (!parent || parent->type != TASK_USER ||
-            !parent->user_stack_base || !parent->image) {
+        if (!parent || parent->type != TASK_USER || !parent->image) {
             regs->a0 = (unsigned long)-1;
             return;
         }
-        prog_alloc_size = ALIGN_UP(parent->user_program_size, PAGE_SIZE);
 
-        child_prog = (unsigned long)allocate(prog_alloc_size);
-        if (!child_prog) {
-            regs->a0 = (unsigned long)-1;
-            return;
-        }
-        //just allocate new program image for now
-        memset((void *)child_prog, 0, prog_alloc_size);
-        //should copy from image->base, actaul VA mapping to allocated PA, not user_program_base
-        memcpy((void *)child_prog,
-            (void *)parent->image->base,
-            parent->user_program_size);
-
-        //uthread_create should use USER_CODE_BASE and USER_STACK_BASE and mapping them
-        child = uthread_create(child_prog, parent->user_program_size);
+        child = uthread_create(parent->image->base, parent->user_program_size);
         if (!child) {
-            free((void *)child_prog);
             regs->a0 = (unsigned long)-1;
             return;
         }
+
+        free_mmap_regions(child);
+        if (child->image)
+            free(child->image);
+        child->image = parent->image;
+        child->image->refcount++;
+
         //advance part: child inherit handler
         for (int i = 0; i < MAX_SIGNAL; i++)
             child->signal_handler[i] = parent->signal_handler[i];
@@ -364,10 +354,7 @@ void handle_syscall(struct pt_regs *regs) {
         child->pending_signal = 0;
         child->handling_signal = 0;
         child->signal_stack_base = 0;
-        //copy content with kernel VA that backs the memory
-        memcpy((void *)child->user_stack_base,//user_stack_base is the returned kernel VA from allocator, mapping to actual backing memory
-            (void *)parent->user_stack_base,
-            STACK_SIZE);
+
         //child and parent still use user VA stack
         //modifed so now sp translation
         //becuse paretn and child share same VA kernel addr, can just resume

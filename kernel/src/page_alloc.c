@@ -277,6 +277,21 @@ static struct page *virt_addr_to_page_addr(void *ptr)
     return phys_addr_to_page_addr((void *)pa);
 }
 
+int retain_page(void *ptr)
+{
+    struct page *page;
+
+    if (!ptr)
+        return -1;
+
+    page = virt_addr_to_page_addr(ptr);
+    if (!page || page->alloc_type != ALLOC_TYPE_PAGE || page->refcount <= 0)
+        return -1;
+
+    page->refcount++;
+    return 0;
+}
+
 //if dynamic allocator finds empty pool, ask buddy for a page, and partition that into chunks
 static int request_page_for_chunk(int pool_idx) {
     struct page *page;//pointer to a page metadata from mem_map
@@ -476,6 +491,12 @@ static void dynamic_page_free(void *ptr, struct page *page) {
     (void)ptr;//make compiler stop complaining, passed ptr because chunk one did
 
     idx = page_addr_to_idx(page);
+
+    if (mem_map[idx].refcount > 1) {
+        mem_map[idx].refcount--;
+        return;
+    }
+
     //order = page->order;//use index to access mem_map
 
     //for block, only head metadata is meaningful

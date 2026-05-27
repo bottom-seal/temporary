@@ -4,6 +4,9 @@
 #include "uart.h"
 #include "list.h"
 #include "vm.h"
+#include "mmap.h"
+
+#define ALIGN_UP(x, a) (((x) + (a) - 1) & ~((a) - 1))
 //to solve the problem of sp saved in context switch of idle will be boot stack, treat boot job as a thread task
 static struct task_struct boot_task;
 static struct task_struct *boot_task_ptr = &boot_task;
@@ -227,14 +230,14 @@ struct task_struct *kthread_create(void (*entry)(void)) {
 //uthread:
 //create: initialize fields, sets up conext, but thread not ready to be queued
 //expects user program is allocated before this function
-struct task_struct *uthread_create(unsigned long user_pc,///allocted outside, pass program base, this is now VA, maps to PA backing the actual binary
+struct task_struct *uthread_create(unsigned long program_backing,///with demand paging, this now points to initrd, not the loaded VA anymore
                                    unsigned long user_program_size) {
     struct task_struct *task;
     struct task_struct *parent;
     struct user_image *image;
     unsigned long flags;
 
-    if (!user_pc)
+    if (!program_backing)
         return 0;
     //user image:
     //to track if the program code is shared by other thread
@@ -242,9 +245,10 @@ struct task_struct *uthread_create(unsigned long user_pc,///allocted outside, pa
     if (!image)
         return 0;
 
-    image->base = user_pc;//starts from start of program
+    image->base = program_backing;//starts from start of program
     image->size = user_program_size;
     image->refcount = 1;
+    image->owned = 0;
     //allocate task struct
     task = (struct task_struct *)allocate(sizeof(struct task_struct));
     if (!task) {
@@ -258,40 +262,17 @@ struct task_struct *uthread_create(unsigned long user_pc,///allocted outside, pa
         free(task);
         return 0;
     }
-    //allocate user stack for function call and stuff
-    task->user_stack_base = (unsigned long)allocate(STACK_SIZE);//now this store VA mapping to allocated PA
-    if (!task->user_stack_base) {
-        free((void *)task->kernel_stack_base);
-        free(image);
-        free(task);
-        return 0;
-    }
+
+
     //each uthread has its own pgd, it should have shared kernel upper half mapping
     //and private lower half user mapping
     task->pgd = create_user_pgd();//this function creates a copy of global pgd, with lower half init to 0
     if (!task->pgd) {//just previously allocated stuff
-        free((void *)task->user_stack_base);
         free((void *)task->kernel_stack_base);
         free(image);
         free(task);
         return 0;
     }
-    //Map user program
-    //User VA 0x0 -> physical page containing image->base
-    //image->base is a kernel VA, so convert it to PA before putting it to page table
-    map_pages(task->pgd,
-              USER_CODE_BASE,//va
-              user_program_size,
-              virt_to_phys(image->base),//image->base is return by allocator, is VA
-              PROT_USER_RX);//program can't be written
-    //Map user stack:
-    //User VA 0x3ffffff000 -> physical page containing task->user_stack_base
-    //Initial user SP should be 0x4000000000.
-     map_pages(task->pgd,
-              USER_STACK_BASE,//va
-              USER_STACK_TOP - USER_STACK_BASE,
-              virt_to_phys(task->user_stack_base),//user stack base is from allocator, is VA
-              PROT_USER_RW);//stack is RW
     //a thread must run uthread_create
     parent = get_current();//get the tp of the calling thread
 
@@ -330,6 +311,40 @@ struct task_struct *uthread_create(unsigned long user_pc,///allocted outside, pa
     INIT_LIST_HEAD(&task->sibling_list);
     INIT_LIST_HEAD(&task->mmap_list);
     task->mmap_next = USER_MMAP_BASE;
+
+    //lab6 adv part 2
+    if (add_user_region(task,
+                    USER_CODE_BASE,
+                    ALIGN_UP(image->size, PAGE_SIZE),
+                    MMAP_PROT_READ | MMAP_PROT_EXEC,
+                    0,
+                    VM_REGION_PROGRAM,
+                    image->base,
+                    image->size) < 0) {
+        free_user_pgd(task->pgd);
+        free((void *)task->kernel_stack_base);
+        free(image);
+        free(task);
+        return 0;
+    }
+
+    if (add_user_region(task,
+                        USER_STACK_BASE,
+                        USER_STACK_TOP - USER_STACK_BASE,
+                        MMAP_PROT_READ | MMAP_PROT_WRITE,
+                        MAP_ANONYMOUS,
+                        VM_REGION_STACK,
+                        0,
+                        0) < 0) {
+        free_mmap_regions(task);
+        free_user_pgd(task->pgd);
+        free((void *)task->kernel_stack_base);
+        free(image);
+        free(task);
+        return 0;
+    }
+
+
     //nr_threads, all_tasks_queue, and parent's child_list are shared task state.
     flags = irq_save();
 
@@ -355,7 +370,7 @@ int setup_user_context(struct task_struct *task) {
         return -1;
     //uthread_create should return 0 if those would fail, still check
     //lab 6 : removed !task->user_program_base, as it should now always point to addr 0 in VA
-    if (!task->kernel_stack_base || !task->user_stack_base || !task->user_sp)
+    if (!task->kernel_stack_base || !task->pgd || !task->user_sp)//adv part 2, no need to check user_stack_base != 0
         return -1;
 
     //reserve space on the user task’s kernel stack for trap frame
@@ -505,7 +520,8 @@ static void free_task(struct task_struct *task) {
         if (task->image) {
             task->image->refcount--;
             if (task->image->refcount == 0) {
-                free((void *)task->image->base);
+                if (task->image->owned)
+                    free((void *)task->image->base);
                 free(task->image);
             }
         }
@@ -904,7 +920,6 @@ void free_mmap_regions(struct task_struct *task)
 
             free(region->pages);
         }
-
 
         free(region);//free mmap struct
     }

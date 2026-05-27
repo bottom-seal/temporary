@@ -86,7 +86,7 @@ void shell_execute(const char *cmd) {
         unsigned long program_size;
         struct task_struct *task;
 
-        if (initrd_load_program((const void *)phys_to_virt(initrd_start),//bug: initrd was not VA, result parsed from dtb still PA
+        if (initrd_find_program((const void *)phys_to_virt(initrd_start),//bug: initrd was not VA, result parsed from dtb still PA
                                 filename,
                                 &program_base,
                                 &program_size) != 0) {

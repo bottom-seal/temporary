@@ -98,6 +98,47 @@ int initrd_load_program(const void *rd,
         p = data + align_up(filesize, 4);
     }
 }
+
+int initrd_find_program(const void *rd,
+                        const char *filename,
+                        unsigned long *program_base,
+                        unsigned long *program_size)
+{
+    const char *p;
+
+    if (!rd || !filename || !program_base || !program_size)
+        return -1;
+
+    p = (const char *)rd;
+
+    while (1) {
+        const struct cpio_t *hdr = (const struct cpio_t *)p;
+
+        if (strncmp(hdr->magic, "070701", 6) != 0)
+            return -1;
+
+        int namesize = hextoi(hdr->namesize, 8);
+        int filesize = hextoi(hdr->filesize, 8);
+        const char *name = p + sizeof(struct cpio_t);
+        const char *data;
+
+        if (strcmp(name, "TRAILER!!!") == 0)
+            return -1;
+
+        data = p + align_up(sizeof(struct cpio_t) + namesize, 4);
+
+        if (strcmp(name, filename) == 0) {
+            if (filesize <= 0)
+                return -1;
+
+            *program_base = (unsigned long)data;   // pointer into initrd
+            *program_size = (unsigned long)filesize;
+            return 0;
+        }
+
+        p = data + align_up(filesize, 4);
+    }
+}
 /*legacy: load program from initramfs without thread support
 int initrd_exec(const void *rd, const char *filename) {
     //check input valid

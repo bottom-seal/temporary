@@ -20,21 +20,33 @@ enum task_type {
 };
 
 struct user_image {
-    unsigned long base;
+    unsigned long base; // demand paging: now points to initrd, not loaded kernel VA
     unsigned long size;
     int refcount;
+    //lab 6
+    int owned;            // 0 = do not free base
+};
+
+enum vm_region_type {
+    VM_REGION_PROGRAM,
+    VM_REGION_ANON,
+    VM_REGION_STACK,
+    VM_REGION_SIGNAL,
 };
 
 struct mmap_region {
     unsigned long start;      // user VA
     unsigned long length;     // rounded up to PAGE_SIZE
 
-    // pages[i] = kernel VA of allocated physical page
-    // pages[i] = 0 means not allocated yet
-    unsigned long *pages;
+    unsigned long backing;    // kernel VA backing; only meaningful for program image
+    unsigned long file_size;  // original program size for partial final page
+    unsigned long *pages;     // kernel VAs for pages already allocated/mapped
 
     int prot;
     int flags;
+
+    enum vm_region_type type;
+
     struct list_head list;
 };
 

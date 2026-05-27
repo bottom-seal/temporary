@@ -6,6 +6,7 @@
 #include "thread.h"
 #include "syscall.h"
 #include "mmap.h"
+#include "vm.h"
 
 #define SSTATUS_SIE (1UL << 1)
 
@@ -64,8 +65,11 @@ void do_trap(struct pt_regs *regs) {
             plic_complete(irq);
     }
     else if (!is_interrupt &&
-            from_user &&
-            (code == 12 || code == 13 || code == 15)) {
+            (code == 12 || code == 13 || code == 15) &&
+            (from_user ||
+             (get_current() &&
+              get_current()->type == TASK_USER &&
+              regs->stval < USER_STACK_TOP))) {
         mmap_handle_page_fault(regs);
     }
     else {
