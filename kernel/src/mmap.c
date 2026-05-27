@@ -219,41 +219,10 @@ int copy_mmap_regions(struct task_struct *parent,
         memset(dst->pages, 0, nr_pages * sizeof(unsigned long));
 
         for (unsigned long i = 0; i < nr_pages; i++) {
-            unsigned long new_page;
-            unsigned long pte_flags;
-
             if (!src->pages[i])
                 continue;
 
-            if (src->type == VM_REGION_PROGRAM) {
-                if (retain_page((void *)src->pages[i]) < 0) {
-                    for (unsigned long j = 0; j < i; j++) {
-                        if (dst->pages[j])
-                            free((void *)dst->pages[j]);
-                    }
-
-                    free(dst->pages);
-                    free(dst);
-                    free_mmap_regions(child);
-                    return -1;
-                }
-
-                dst->pages[i] = src->pages[i];
-
-                if (src->prot != MMAP_PROT_NONE) {
-                    pte_flags = mmap_prot_to_pte(src->prot);
-                    map_pages(child->pgd,
-                              src->start + i * PAGE_SIZE,
-                              PAGE_SIZE,
-                              virt_to_phys(src->pages[i]),
-                              pte_flags);
-                }
-
-                continue;
-            }
-
-            new_page = (unsigned long)allocate(PAGE_SIZE);
-            if (!new_page) {
+            if (retain_page((void *)src->pages[i]) < 0) {
                 for (unsigned long j = 0; j < i; j++) {
                     if (dst->pages[j])
                         free((void *)dst->pages[j]);
@@ -265,17 +234,7 @@ int copy_mmap_regions(struct task_struct *parent,
                 return -1;
             }
 
-            memcpy((void *)new_page, (void *)src->pages[i], PAGE_SIZE);
-            dst->pages[i] = new_page;
-
-            if (src->prot != MMAP_PROT_NONE) {
-                pte_flags = mmap_prot_to_pte(src->prot);
-                map_pages(child->pgd,
-                          src->start + i * PAGE_SIZE,
-                          PAGE_SIZE,
-                          virt_to_phys(new_page),
-                          pte_flags);
-            }
+            dst->pages[i] = src->pages[i];
         }
 
         list_add_tail(&dst->list, &child->vm_regions);//add to child list
@@ -423,16 +382,47 @@ int mmap_handle_page_fault(struct pt_regs *regs)
         return -1;
     }
 
-    /*
-     * If page already exists but we still faulted,
-     * it is probably a permission fault.
-     * Part 3 CoW may handle this differently.
-     */
-    //already mapped, but still faulted: permission fault -> kill process
     if (region->pages[page_idx]) {
-        uart_puts("[Segmentation fault]: Kill Process\n");
-        thread_exit_status(-1);
-        return -1;
+        unsigned long *pte;
+        unsigned long old_page;
+        unsigned long new_page;
+
+        pte = get_pte(current->pgd, page_va);
+        if (code != 15 || !pte || !(*pte & PTE_COW) ||
+            !(region->prot & MMAP_PROT_WRITE)) {
+            uart_puts("[Segmentation fault]: Kill Process\n");
+            thread_exit_status(-1);
+            return -1;
+        }
+
+        old_page = region->pages[page_idx];
+        if (page_refcount((void *)old_page) > 1) {
+            new_page = (unsigned long)allocate(PAGE_SIZE);
+            if (!new_page) {
+                uart_puts("[Segmentation fault]: Kill Process\n");
+                thread_exit_status(-1);
+                return -1;
+            }
+
+            memcpy((void *)new_page, (void *)old_page, PAGE_SIZE);
+            free((void *)old_page);
+            region->pages[page_idx] = new_page;
+        } else {
+            new_page = old_page;
+        }
+
+        pte_flags = mmap_prot_to_pte(region->prot);
+        map_pages(current->pgd,
+                  page_va,
+                  PAGE_SIZE,
+                  virt_to_phys(new_page),
+                  pte_flags);
+
+        asm volatile("sfence.vma %0, zero" :: "r"(page_va) : "memory");
+        uart_puts("[Permission fault]: ");
+        uart_hex(addr);
+        uart_puts("\n");
+        return 0;
     }
 
     //legal path: allocate a page and maps user VA

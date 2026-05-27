@@ -514,7 +514,6 @@ static void free_task(struct task_struct *task) {
     //image cnt--, so we know when we can free
     if (task->type == TASK_USER) {
         free_mmap_regions(task);
-        free((void *)task->user_stack_base);
         if (task->image) {
             task->image->refcount--;
             if (task->image->refcount == 0) {

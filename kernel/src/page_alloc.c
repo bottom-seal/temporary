@@ -292,6 +292,20 @@ int retain_page(void *ptr)
     return 0;
 }
 
+int page_refcount(void *ptr)
+{
+    struct page *page;
+
+    if (!ptr)
+        return 0;
+
+    page = virt_addr_to_page_addr(ptr);
+    if (!page || page->alloc_type != ALLOC_TYPE_PAGE || page->refcount <= 0)
+        return 0;
+
+    return page->refcount;
+}
+
 //if dynamic allocator finds empty pool, ask buddy for a page, and partition that into chunks
 static int request_page_for_chunk(int pool_idx) {
     struct page *page;//pointer to a page metadata from mem_map

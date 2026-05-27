@@ -374,6 +374,11 @@ void handle_syscall(struct pt_regs *regs) {
             return;
         }
 
+        if (cow_copy_user_pagetable(parent->pgd, child->pgd) != 0) {
+            thread_destroy(child);
+            regs->a0 = (unsigned long)-1;
+            return;
+        }
 
         if (setup_user_context(child) != 0) {
              thread_destroy(child);

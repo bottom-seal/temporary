@@ -48,6 +48,7 @@ struct pool {
 void *allocate(unsigned int size);
 void free(void *ptr);
 int retain_page(void *ptr);
+int page_refcount(void *ptr);
 unsigned int page_addr_to_idx(struct page *page);
 struct page *idx_to_page_addr(unsigned int idx);
 int free_area_count(unsigned int order);

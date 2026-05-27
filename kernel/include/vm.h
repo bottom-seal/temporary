@@ -29,6 +29,7 @@ extern uintptr_t uart_base;
 #define PTE_G  (1UL << 5)
 #define PTE_A  (1UL << 6)
 #define PTE_D  (1UL << 7)
+#define PTE_COW (1UL << 8)
 //basic part 2 USER addr space
 #define USER_CODE_BASE   0x0UL
 #define USER_STACK_TOP   0x4000000000UL
@@ -92,4 +93,8 @@ void map_pages(unsigned long *root,
                unsigned long prot);
 void switch_pgd(unsigned long *next_pgd);
 void free_user_pgd(unsigned long *root);
+unsigned long pte_to_pa(unsigned long pte);
+unsigned long *get_pte(unsigned long *root, unsigned long va);
+int cow_copy_user_pagetable(unsigned long *parent_pgd,
+                            unsigned long *child_pgd);
 #endif

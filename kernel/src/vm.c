@@ -32,7 +32,7 @@ static inline unsigned long pte_index(unsigned long va)
 {
     return (va >> PTE_SHIFT) & 0x1ff;
 }
-static inline unsigned long pte_to_pa(unsigned long pte)
+unsigned long pte_to_pa(unsigned long pte)
 {
     return (pte >> 10) << 12;
 }
@@ -257,6 +257,116 @@ void map_pages(unsigned long *root,
 {
     for (unsigned long off = 0; off < size; off += PAGE_SIZE)
         pagewalk(root, va + off, pa + off, prot);
+}
+//given a va, get the entry in PTE level
+unsigned long *get_pte(unsigned long *root, unsigned long va)
+{
+    unsigned long vpn[3];
+    unsigned long *table;
+    
+    if (!root)
+        return 0;
+
+    vpn[0] = (va >> PTE_SHIFT) & 0x1ff;
+    vpn[1] = (va >> PMD_SHIFT) & 0x1ff;
+    vpn[2] = (va >> PGD_SHIFT) & 0x1ff;
+
+    table = root;
+    for (int level = 2; level > 0; level--) {
+        unsigned long pte = table[vpn[level]];
+
+        if (!(pte & PTE_V) || is_leaf_pte(pte))
+            return 0;
+
+        table = (unsigned long *)phys_to_virt(pte_to_pa(pte));
+    }
+
+    return &table[vpn[0]];
+}
+
+static int cow_copy_leaf(unsigned long *parent_pte,
+                         unsigned long *child_pte)
+{
+    unsigned long pte = *parent_pte;
+    unsigned long flags = pte & 0x3ffUL;
+
+    if ((pte & PTE_U) && (flags & PTE_W)) {
+        flags = (flags & ~PTE_W) | PTE_COW;
+        pte = MAKE_PTE(pte_to_pa(pte), flags);
+        *parent_pte = pte;
+    }
+
+    *child_pte = pte;
+    return 0;
+}
+
+static int cow_copy_level(unsigned long *parent,
+                          unsigned long *child,
+                          int level)
+{
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
+        unsigned long pte = parent[i];
+
+        if (!(pte & PTE_V))
+            continue;
+
+        if (is_leaf_pte(pte)) {
+            cow_copy_leaf(&parent[i], &child[i]);
+            continue;
+        }
+
+        unsigned long *child_next = allocate(PAGE_SIZE);
+        if (!child_next)
+            return -1;
+
+        memset(child_next, 0, PAGE_SIZE);
+        child[i] = MAKE_PTE(virt_to_phys((unsigned long)child_next), PTE_V);
+
+        if (level > 0) {
+            unsigned long *parent_next =
+                (unsigned long *)phys_to_virt(pte_to_pa(pte));
+
+            if (cow_copy_level(parent_next, child_next, level - 1) < 0)
+                return -1;
+        }
+    }
+
+    return 0;
+}
+
+int cow_copy_user_pagetable(unsigned long *parent_pgd,
+                            unsigned long *child_pgd)
+{
+    if (!parent_pgd || !child_pgd)
+        return -1;
+
+    for (int i = 0; i < 256; i++) {
+        unsigned long pte = parent_pgd[i];
+
+        if (!(pte & PTE_V))
+            continue;
+
+        if (is_leaf_pte(pte)) {
+            cow_copy_leaf(&parent_pgd[i], &child_pgd[i]);
+            continue;
+        }
+
+        unsigned long *child_pmd = allocate(PAGE_SIZE);
+        if (!child_pmd)
+            return -1;
+
+        memset(child_pmd, 0, PAGE_SIZE);
+        child_pgd[i] = MAKE_PTE(virt_to_phys((unsigned long)child_pmd), PTE_V);
+
+        unsigned long *parent_pmd =
+            (unsigned long *)phys_to_virt(pte_to_pa(pte));
+
+        if (cow_copy_level(parent_pmd, child_pmd, 1) < 0)
+            return -1;
+    }
+
+    asm volatile("sfence.vma zero, zero" ::: "memory");
+    return 0;
 }
 //later called like : maps user VA to some PA backed by kernel VA, because allocation returns VA 
 /*
