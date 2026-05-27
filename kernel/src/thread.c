@@ -151,7 +151,7 @@ void thread_init(void) {
     INIT_LIST_HEAD(&boot_task.child_list);
     INIT_LIST_HEAD(&boot_task.sibling_list);
     //lab6
-    INIT_LIST_HEAD(&boot_task.mmap_list);
+    INIT_LIST_HEAD(&boot_task.vm_regions);
     boot_task.mmap_next = USER_MMAP_BASE;
     add_to_all_tasks(&boot_task);
 
@@ -213,7 +213,7 @@ struct task_struct *kthread_create(void (*entry)(void)) {
     INIT_LIST_HEAD(&task->zombie_list);
     INIT_LIST_HEAD(&task->child_list);
     INIT_LIST_HEAD(&task->sibling_list);
-    INIT_LIST_HEAD(&task->mmap_list);
+    INIT_LIST_HEAD(&task->vm_regions);
     task->mmap_next = USER_MMAP_BASE;
     //nr_threads, all_tasks_queue, and run_queue are shared scheduler state.
     flags = irq_save();
@@ -245,25 +245,23 @@ struct task_struct *uthread_create(unsigned long program_backing,///with demand 
     if (!image)
         return 0;
 
-    image->base = program_backing;//starts from start of program
+    image->base = program_backing;//points to initrd program base
     image->size = user_program_size;
     image->refcount = 1;
-    image->owned = 0;
+    image->owned = 0;// 0 means pointing to initrd
     //allocate task struct
     task = (struct task_struct *)allocate(sizeof(struct task_struct));
     if (!task) {
         free(image);
         return 0;
     }
-    //allocate kernel stack, need for trap 
+    //allocate kernel stack, need for trap (kernel structure, no need to demand paing)
     task->kernel_stack_base = (unsigned long)allocate(STACK_SIZE);
     if (!task->kernel_stack_base) {
         free(image);
         free(task);
         return 0;
     }
-
-
     //each uthread has its own pgd, it should have shared kernel upper half mapping
     //and private lower half user mapping
     task->pgd = create_user_pgd();//this function creates a copy of global pgd, with lower half init to 0
@@ -309,7 +307,7 @@ struct task_struct *uthread_create(unsigned long program_backing,///with demand 
     INIT_LIST_HEAD(&task->zombie_list);
     INIT_LIST_HEAD(&task->child_list);
     INIT_LIST_HEAD(&task->sibling_list);
-    INIT_LIST_HEAD(&task->mmap_list);
+    INIT_LIST_HEAD(&task->vm_regions);
     task->mmap_next = USER_MMAP_BASE;
 
     //lab6 adv part 2
@@ -520,7 +518,7 @@ static void free_task(struct task_struct *task) {
         if (task->image) {
             task->image->refcount--;
             if (task->image->refcount == 0) {
-                if (task->image->owned)
+                if (task->image->owned)//additionaly check owned
                     free((void *)task->image->base);
                 free(task->image);
             }
@@ -902,11 +900,11 @@ void free_mmap_regions(struct task_struct *task)
     if (!task)
         return;
 
-    while (!list_empty(&task->mmap_list)) {//remove until list empty
-        struct mmap_region *region;
+    while (!list_empty(&task->vm_regions)) {//remove until list empty
+        struct vm_region *region;
 
-        curr = task->mmap_list.next;
-        region = list_entry(curr, struct mmap_region, list);
+        curr = task->vm_regions.next;
+        region = list_entry(curr, struct vm_region, list);
 
         list_del(&region->list);
 

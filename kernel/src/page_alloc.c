@@ -491,7 +491,7 @@ static void dynamic_page_free(void *ptr, struct page *page) {
     (void)ptr;//make compiler stop complaining, passed ptr because chunk one did
 
     idx = page_addr_to_idx(page);
-
+    //lab 6, for allocated program image page, more than 1 user VA might be mapped to it, do not free it if someone is still using
     if (mem_map[idx].refcount > 1) {
         mem_map[idx].refcount--;
         return;

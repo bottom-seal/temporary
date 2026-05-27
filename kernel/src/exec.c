@@ -98,7 +98,8 @@ int initrd_load_program(const void *rd,
         p = data + align_up(filesize, 4);
     }
 }
-
+//previous function loads whole program to allocated kernel VA buffer
+//now just finds pointer to base, and size
 int initrd_find_program(const void *rd,
                         const char *filename,
                         unsigned long *program_base,

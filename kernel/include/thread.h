@@ -24,7 +24,7 @@ struct user_image {
     unsigned long size;
     int refcount;
     //lab 6
-    int owned;            // 0 = do not free base
+    int owned;            // 0 means base point to initrd, not owned memory (shouldn't be 1 at all)
 };
 
 enum vm_region_type {
@@ -34,18 +34,18 @@ enum vm_region_type {
     VM_REGION_SIGNAL,
 };
 
-struct mmap_region {
+struct vm_region {
     unsigned long start;      // user VA
     unsigned long length;     // rounded up to PAGE_SIZE
 
     unsigned long backing;    // kernel VA backing; only meaningful for program image
-    unsigned long file_size;  // original program size for partial final page
-    unsigned long *pages;     // kernel VAs for pages already allocated/mapped
+    unsigned long file_size;  // avoid copying exceeding the actual file in initrd
+    unsigned long *pages;     // array, if not allocated = 0, if allocated = kernel VA
 
     int prot;
     int flags;
 
-    enum vm_region_type type;
+    enum vm_region_type type;// page fault handler do different thing based on type
 
     struct list_head list;
 };
@@ -104,8 +104,7 @@ struct task_struct {
     struct pt_regs saved_signal_regs;         // original user context, because we need to overwrite fields to jump to handler, and handler would save new regs
     unsigned long signal_stack_base;          // temporary signal stack
 
-    //
-    struct list_head mmap_list;//head of the linked list of mmap regions
+    struct list_head vm_regions;//head of all user VM regions
     unsigned long mmap_next;//help with request addr = NULL, need to find next available addr
 };
 

@@ -231,6 +231,7 @@ void handle_syscall(struct pt_regs *regs) {
             regs->a0 = (unsigned long)-1;
             return;
         }
+        //just finds pointer to image base in initrd and size, no allocation
 
         // user image structure for task_struct
         new_image = (struct user_image *)allocate(sizeof(struct user_image));
@@ -257,7 +258,7 @@ void handle_syscall(struct pt_regs *regs) {
         old_image = current->image;
         old_pgd = current->pgd;
 
-        free_mmap_regions(current);
+        free_mmap_regions(current);//should free all allocated pages, will check if refcount >= 1 for image pages
 
         //replace thread fields
         current->image = new_image;
@@ -271,6 +272,7 @@ void handle_syscall(struct pt_regs *regs) {
         current->pgd = new_pgd;
 
         current->user_stack_base = 0;
+        //add program image and stack
         if (add_user_region(current,
                             USER_CODE_BASE,
                             ALIGN_UP(new_size, PAGE_SIZE),
@@ -287,7 +289,7 @@ void handle_syscall(struct pt_regs *regs) {
                             VM_REGION_STACK,
                             0,
                             0) < 0) {
-            free_mmap_regions(current);
+            free_mmap_regions(current);//might fail on stack after image success
             current->image = old_image;
             current->pgd = old_pgd;
             free_user_pgd(new_pgd);
@@ -304,7 +306,7 @@ void handle_syscall(struct pt_regs *regs) {
         if (old_image) {
             old_image->refcount--;
             if (old_image->refcount == 0) {
-                if (old_image->owned)
+                if (old_image->owned)//should never happen
                     free((void *)old_image->base);
                 free(old_image);
             }
@@ -321,7 +323,7 @@ void handle_syscall(struct pt_regs *regs) {
         regs->tp = (unsigned long)current;// process is still this one
         regs->a0 = 0;//return 0 on success
     }
-    else if (num == SYS_FORK) {
+    else if (num == SYS_FORK) {//going to modify in part 3
         //Create a new child user task.
         //The child continues from the same user instruction as the parent.
         //Parent sees fork() return child pid.

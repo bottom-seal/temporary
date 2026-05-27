@@ -11,20 +11,22 @@
 #define ALIGN_DOWN(x, a) ((x) & ~((a) - 1))
 
 //adv part 2
-static struct mmap_region *find_mmap_region(struct task_struct *task,
+
+//given a user VA, return which user region for the thread contains it
+static struct vm_region *find_mmap_region(struct task_struct *task,
                                             unsigned long addr)
 {
     struct list_head *curr;
 
     if (!task)
         return 0;
-
-    for (curr = task->mmap_list.next;
-         curr != &task->mmap_list;
+    //loop through user vm regions
+    for (curr = task->vm_regions.next;
+         curr != &task->vm_regions;
          curr = curr->next) {
-        struct mmap_region *region =
-            list_entry(curr, struct mmap_region, list);
-
+        struct vm_region *region =
+            list_entry(curr, struct vm_region, list);
+        //check which region the target addr is in
         if (addr >= region->start &&
             addr < region->start + region->length)
             return region;
@@ -32,8 +34,9 @@ static struct mmap_region *find_mmap_region(struct task_struct *task,
 
     return 0;
 }
-
-static int mmap_access_allowed(struct mmap_region *region,
+//page fault happen for different reason
+//input, a region struct that records prot, return 0 means illegal, 1 means legal
+static int mmap_access_allowed(struct vm_region *region,
                                unsigned long scause_code)
 {
     if (!region)
@@ -42,15 +45,15 @@ static int mmap_access_allowed(struct mmap_region *region,
     if (region->prot == MMAP_PROT_NONE)
         return 0;
 
-    // instruction page fault
+    //is instruction page fault, and region is executable
     if (scause_code == 12)
         return region->prot & MMAP_PROT_EXEC;
 
-    // load page fault
+    //is load page fault, and region is readable
     if (scause_code == 13)
         return region->prot & MMAP_PROT_READ;
 
-    // store/AMO page fault
+    //is store/AMO page fault, and region is writable
     if (scause_code == 15)
         return region->prot & MMAP_PROT_WRITE;
 
@@ -86,7 +89,7 @@ static int range_overlap(unsigned long a_start, unsigned long a_end,
 }
 
 //check if placing region at [start, end) overlaps with anything
-//return 0 if no overlap
+//return 0 if no overlap, 1 if overlap
 static int mmap_region_overlap(struct task_struct *task,
                                unsigned long start,
                                unsigned long end)
@@ -95,25 +98,10 @@ static int mmap_region_overlap(struct task_struct *task,
 
     if (!task)
         return 1;
-
-    // overlap with user program
-    if (range_overlap(start, end,
-                      USER_CODE_BASE,
-                      USER_CODE_BASE + ALIGN_UP(task->user_program_size, PAGE_SIZE)))
-        return 1;
-
-    // overlap with normal user stack
-    if (range_overlap(start, end, USER_STACK_BASE, USER_STACK_TOP))
-        return 1;
-
-    // overlap with signal stack
-    if (range_overlap(start, end, USER_SIGNAL_STACK_BASE, USER_SIGNAL_STACK_TOP))
-        return 1;
-
     // overlap with existing mmap regions
-    for (curr = task->mmap_list.next; curr != &task->mmap_list; curr = curr->next) {//mmap_list is the list head
-        struct mmap_region *region =
-            list_entry(curr, struct mmap_region, list);//get the struct for the node 
+    for (curr = task->vm_regions.next; curr != &task->vm_regions; curr = curr->next) {//vm_regions is the list head
+        struct vm_region *region =
+            list_entry(curr, struct vm_region, list);//get the struct for the node
 
         if (range_overlap(start, end,
                           region->start,
@@ -124,6 +112,8 @@ static int mmap_region_overlap(struct task_struct *task,
     return 0;
 }
 
+//start searching from start to MMAP_TOP, then search from MMAP_BASE to start
+//avoid holes before start
 static unsigned long find_free_mmap_area_from(struct task_struct *task,
                                               unsigned long start,
                                               unsigned long length)
@@ -160,7 +150,7 @@ static unsigned long find_free_mmap_area_from(struct task_struct *task,
 }
 
 
-//return 0 on fail, return addr on success
+//find from recorded possible addr, if user requested NULL
 static unsigned long find_free_mmap_area(struct task_struct *task,
                                          unsigned long length)
 {
@@ -172,14 +162,14 @@ static unsigned long find_free_mmap_area(struct task_struct *task,
 
     return addr;
 }
-
+//find from user requested addr
 static unsigned long find_free_mmap_area_hint(struct task_struct *task,
                                               unsigned long hint,
                                               unsigned long length)
 {
-    return find_free_mmap_area_from(task, hint, length);
+    return find_free_mmap_area_from(task, hint, length);//start from requested addr
 }
-//without COW, child should inherit paren't addr space, need to handle extra allocated memory
+//wait until COW
 int copy_mmap_regions(struct task_struct *parent,
                              struct task_struct *child)
 {
@@ -190,17 +180,17 @@ int copy_mmap_regions(struct task_struct *parent,
 
     child->mmap_next = parent->mmap_next;//next possible available addr
 
-    for (curr = parent->mmap_list.next;//for parent's mmap list
-         curr != &parent->mmap_list;
+    for (curr = parent->vm_regions.next;//for parent's mmap list
+         curr != &parent->vm_regions;
          curr = curr->next) {
-        struct mmap_region *src =
-            list_entry(curr, struct mmap_region, list);
+        struct vm_region *src =
+            list_entry(curr, struct vm_region, list);
 
-        struct mmap_region *dst;
+        struct vm_region *dst;
         unsigned long nr_pages;
 
         //allocate for structure
-        dst = (struct mmap_region *)allocate(sizeof(struct mmap_region));
+        dst = (struct vm_region *)allocate(sizeof(struct vm_region));
         if (!dst) {
             free_mmap_regions(child);
             return -1;
@@ -288,7 +278,7 @@ int copy_mmap_regions(struct task_struct *parent,
             }
         }
 
-        list_add_tail(&dst->list, &child->mmap_list);//add to child list
+        list_add_tail(&dst->list, &child->vm_regions);//add to child list
     }
 
     return 0;
@@ -298,30 +288,28 @@ int copy_mmap_regions(struct task_struct *parent,
 unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
                               unsigned long length,
                               int prot,//prot, could be combination
-                              int flags)
+                              int flags)//maps right away if POPULATE set
 {
     struct task_struct *current = get_current();
-    struct mmap_region *region;
+    struct vm_region *region;
     unsigned long user_va;
     unsigned long nr_pages;
-
+    //check user thread
     if (!current || current->type != TASK_USER)
         return (unsigned long)-1;
-
+    //check range valid
     if (length == 0)
         return (unsigned long)-1;
 
-    if (!(flags & MAP_ANONYMOUS))
+    if (!(flags & MAP_ANONYMOUS))//doesn't support file backed mapping
+
         return (unsigned long)-1;
 
-    if (prot & ~(MMAP_PROT_READ | MMAP_PROT_WRITE | MMAP_PROT_EXEC))
+    if (prot & ~(MMAP_PROT_READ | MMAP_PROT_WRITE | MMAP_PROT_EXEC))//only support 3 permission bits
         return (unsigned long)-1;
 
     length = ALIGN_UP(length, PAGE_SIZE);//align to page
 
-    // For Advanced 1, easiest design:
-    // always allocate immediately, even if MAP_POPULATE is not set.
-    // Demand paging can be added in Advanced 2.
     //if user requested addr is not NULL
     if (addr) {
         unsigned long hint = (unsigned long)addr;
@@ -335,26 +323,26 @@ unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
     } else {//NULL path
         user_va = find_free_mmap_area(current, length);
     }
-
+    //after found user_va
     if (!user_va)
         return (unsigned long)-1;
-
-    region = (struct mmap_region *)allocate(sizeof(struct mmap_region));
+    //allocate for vm_region struct
+    region = (struct vm_region *)allocate(sizeof(struct vm_region));
     if (!region)
         return (unsigned long)-1;
-
+    //init vm_region
     region->start = user_va;
     region->length = length;
     region->backing = 0;
     region->file_size = 0;
     region->prot = prot;
     region->flags = flags;
-    region->type = VM_REGION_ANON;
+    region->type = VM_REGION_ANON;//mmap is always anonymous
     region->pages = 0;
     INIT_LIST_HEAD(&region->list);
 
-    nr_pages = region->length / PAGE_SIZE;
-
+    nr_pages = region->length / PAGE_SIZE;// how many pages needed
+    //allocate the array to record page : 0 = not allocated, kervel VA = allocated at *
     region->pages = (unsigned long *)allocate(nr_pages * sizeof(unsigned long));
     if (!region->pages) {
         free(region);
@@ -362,35 +350,38 @@ unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
     }
     memset(region->pages, 0, nr_pages * sizeof(unsigned long));
 
+    //if set POPULATE flag
     if ((flags & MAP_POPULATE) && prot != MMAP_PROT_NONE) {
+        //translate flags
         unsigned long pte_flags = mmap_prot_to_pte(prot);
-
+        //allocate all pages
         for (unsigned long i = 0; i < nr_pages; i++) {
             unsigned long page = (unsigned long)allocate(PAGE_SIZE);
-
+            //if any allocation fail, free all previously allocated pages
             if (!page) {
                 for (unsigned long j = 0; j < i; j++) {
                     if (region->pages[j])
                         free((void *)region->pages[j]);
                 }
 
-                free(region->pages);
+                free(region->pages);//free allocated array
                 free(region);
                 return (unsigned long)-1;
             }
-
+            //init allocated 4kb
             memset((void *)page, 0, PAGE_SIZE);
-            region->pages[i] = page;
-
+            region->pages[i] = page;//pages array stores kernel VA if allocated & mapped
+            //map the page
             map_pages(current->pgd,
                       user_va + i * PAGE_SIZE,
                       PAGE_SIZE,
                       virt_to_phys(page),
                       pte_flags);
         }
+        //modifed page table, need to do sfence vma
         asm volatile("sfence.vma zero, zero" ::: "memory");
     }
-    list_add_tail(&region->list, &current->mmap_list);
+    list_add_tail(&region->list, &current->vm_regions);
 
     return user_va;//return user VA for the allocated mmap
 }
@@ -399,7 +390,7 @@ unsigned long sys_mmap(void *addr,//user hinted addr, put user VA here if can
 int mmap_handle_page_fault(struct pt_regs *regs)
 {
     struct task_struct *current = get_current();
-    struct mmap_region *region;
+    struct vm_region *region;
     unsigned long addr;
     unsigned long page_va;
     unsigned long page_idx;
@@ -408,25 +399,25 @@ int mmap_handle_page_fault(struct pt_regs *regs)
     unsigned long pte_flags;
     unsigned long code;
 
-    if (!current || current->type != TASK_USER)
+    if (!current || current->type != TASK_USER)//only accept user thread
         return -1;
 
-    addr = regs->stval;
-    code = regs->scause & 0xfffUL;
+    addr = regs->stval;//stval is the virtual addr that caused the interrupt
+    code = regs->scause & 0xfffUL;//scause records interrupt number, only need to check if it is 12, 13, 15, just get lower bits
     page_va = ALIGN_DOWN(addr, PAGE_SIZE);
 
-    region = find_mmap_region(current, addr);
+    region = find_mmap_region(current, addr);//the region in vm_region list, that contains the interrupting VA
 
-    if (!region || !mmap_access_allowed(region, code)) {
+    if (!region || !mmap_access_allowed(region, code)) {//not in recorded region OR access not allowed
         uart_puts("[Segmentation fault]: Kill Process\n");
         thread_exit_status(-1);
         return -1;
     }
-
+    //would be caught earlier, just for safety
     nr_pages = region->length / PAGE_SIZE;
-    page_idx = (page_va - region->start) / PAGE_SIZE;
+    page_idx = (page_va - region->start) / PAGE_SIZE;//index of page in a region, used to check
 
-    if (page_idx >= nr_pages) {
+    if (page_idx >= nr_pages) {//exceeding the range
         uart_puts("[Segmentation fault]: Kill Process\n");
         thread_exit_status(-1);
         return -1;
@@ -437,12 +428,16 @@ int mmap_handle_page_fault(struct pt_regs *regs)
      * it is probably a permission fault.
      * Part 3 CoW may handle this differently.
      */
+    //already mapped, but still faulted: permission fault -> kill process
     if (region->pages[page_idx]) {
         uart_puts("[Segmentation fault]: Kill Process\n");
         thread_exit_status(-1);
         return -1;
     }
 
+    //legal path: allocate a page and maps user VA
+
+    //allocate 4kb page
     page = (unsigned long)allocate(PAGE_SIZE);
     if (!page) {
         uart_puts("[Segmentation fault]: Kill Process\n");
@@ -451,35 +446,38 @@ int mmap_handle_page_fault(struct pt_regs *regs)
     }
 
     memset((void *)page, 0, PAGE_SIZE);
-
+    //if the accessed region is in image region
+    //file backed path
     if (region->type == VM_REGION_PROGRAM) {
-        unsigned long file_off = page_va - region->start;
+        unsigned long file_off = page_va - region->start;//offset starting from image base in initrd
 
-        if (file_off < region->file_size) {
+        if (file_off < region->file_size) {//should always be inside the file range
             unsigned long copy_len = region->file_size - file_off;
-
+            //we cannot copy a whole page if it contains stuff outside image
+            //if copy_len >= a page, allocate and copy that page
+            //if copy_len < a page, copy only offset ~ file_top
             if (copy_len > PAGE_SIZE)
                 copy_len = PAGE_SIZE;
 
-            memcpy((void *)page,
+            memcpy((void *)page,//kernel VA for allocated page
                    (void *)(region->backing + file_off),
-                   copy_len);
-            asm volatile("fence.i" ::: "memory");
+                   copy_len);//copy not exceed image
+            asm volatile("fence.i" ::: "memory");//instruction modifed, CPU fetch need to see fresh updated content (I-cache can't have stale)
         }
     }
-
+    //pages array element records the kernel VA allocated
     region->pages[page_idx] = page;
 
-    pte_flags = mmap_prot_to_pte(region->prot);
-
+    pte_flags = mmap_prot_to_pte(region->prot);//translate requested prot to PTE flag
+    //maps 1 page
     map_pages(current->pgd,
               page_va,
               PAGE_SIZE,
               virt_to_phys(page),
               pte_flags);
 
-    asm volatile("sfence.vma %0, zero" :: "r"(page_va) : "memory");
-
+    asm volatile("sfence.vma %0, zero" :: "r"(page_va) : "memory");//page table updated, need to flush TLB
+    //access legal just not mapped: translation fault
     uart_puts("[Translation fault]: ");
     uart_hex(addr);
     uart_puts("\n");
@@ -487,6 +485,7 @@ int mmap_handle_page_fault(struct pt_regs *regs)
     return 0;
 }
 
+//init and add a region structure to task_struct's vm list
 int add_user_region(struct task_struct *task,
                     unsigned long start,
                     unsigned long length,
@@ -496,20 +495,20 @@ int add_user_region(struct task_struct *task,
                     unsigned long backing,
                     unsigned long file_size)
 {
-    struct mmap_region *region;
+    struct vm_region *region;
 
     if (!task || !length)
         return -1;
-
+    //aligned to pages
     length = ALIGN_UP(length, PAGE_SIZE);
-
-    if (start & (PAGE_SIZE - 1))
+    
+    if (start & (PAGE_SIZE - 1))//check page aligned, return -1 if lower 3 bit is not 000
         return -1;
 
-    if (prot & ~(MMAP_PROT_READ | MMAP_PROT_WRITE | MMAP_PROT_EXEC))
+    if (prot & ~(MMAP_PROT_READ | MMAP_PROT_WRITE | MMAP_PROT_EXEC))//user only has 3 mode, can be combinational
         return -1;
 
-    region = (struct mmap_region *)allocate(sizeof(struct mmap_region));
+    region = (struct vm_region *)allocate(sizeof(struct vm_region));//allocate region struct
     if (!region)
         return -1;
 
@@ -529,7 +528,7 @@ int add_user_region(struct task_struct *task,
     memset(region->pages, 0, (length / PAGE_SIZE) * sizeof(unsigned long));
 
     INIT_LIST_HEAD(&region->list);
-    list_add_tail(&region->list, &task->mmap_list);
+    list_add_tail(&region->list, &task->vm_regions);
 
     return 0;
 }

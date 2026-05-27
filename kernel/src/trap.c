@@ -64,10 +64,10 @@ void do_trap(struct pt_regs *regs) {
         if (irq)
             plic_complete(irq);
     }
-    else if (!is_interrupt &&
-            (code == 12 || code == 13 || code == 15) &&
-            (from_user ||
-             (get_current() &&
+    else if (!is_interrupt &&//is exception (by CPU)
+            (code == 12 || code == 13 || code == 15) && //12 = instruction page fault, 13 = load page fault, 15 = store/AMO page fault
+            (from_user ||//from user mode (must be a user thread): accessing stack, program image, reads mmap
+             (get_current() &&//from kernel mode: eg. disaply accessing bmp buffer, stval: faulting instruction is in user VA
               get_current()->type == TASK_USER &&
               regs->stval < USER_STACK_TOP))) {
         mmap_handle_page_fault(regs);
