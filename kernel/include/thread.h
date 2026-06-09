@@ -3,7 +3,7 @@
 
 #include "list.h"
 #include "trap.h"
-
+#include "vfs.h"
 #define STACK_SIZE 0x8000
 #define MAX_SIGNAL 32
 
@@ -106,6 +106,11 @@ struct task_struct {
 
     struct list_head vm_regions;//head of all user VM regions
     unsigned long mmap_next;//help with request addr = NULL, need to find next available addr
+
+    //for lab 7 per process cwd and fd
+    struct vnode* root;//root dir, where "/" resolves to, starting path resolve from root dir
+    struct vnode* cwd;//current working dir, if path not start with "/", start resolve from here
+    struct file* fd_table[MAX_FD];//fd number -> opened file object
 };
 
 struct task_struct *get_current(void);
@@ -131,4 +136,7 @@ int  process_kill(int  pid, int signum);
 //lab6
 void thread_destroy(struct task_struct *task);
 void free_mmap_regions(struct task_struct *task);
+//lab7 
+void inherit_vfs_state(struct task_struct* child, struct task_struct* parent);
+void close_vfs_state(struct task_struct* task);
 #endif

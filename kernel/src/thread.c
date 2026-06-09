@@ -5,6 +5,7 @@
 #include "list.h"
 #include "vm.h"
 #include "mmap.h"
+#include "vfs.h"
 
 #define ALIGN_UP(x, a) (((x) + (a) - 1) & ~((a) - 1))
 //to solve the problem of sp saved in context switch of idle will be boot stack, treat boot job as a thread task
@@ -22,6 +23,53 @@ extern void ret_from_exception(void);
 
 unsigned long irq_save(void);
 void irq_restore(unsigned long flags);
+
+static void init_vfs_state(struct task_struct* task) {
+    if (!task)
+        return;
+
+    //default root and cwd: rootfs root.
+    task->root = rootfs ? rootfs->root : 0;//rootfs extern from vfs.h
+    task->cwd = task->root;
+
+    //init to 0
+    for (int i = 0; i < MAX_FD; i++)
+        task->fd_table[i] = 0;
+}
+//when fork, child should get parent's vfs states (init child)
+void inherit_vfs_state(struct task_struct* child, struct task_struct* parent) {
+    //no child, no init
+    if (!child)
+        return;
+    //no parent, default init
+    if (!parent) {
+        init_vfs_state(child);
+        return;
+    }
+
+    //copy parent root, cwd, fd table
+    child->root = parent->root;
+    child->cwd = parent->cwd;
+    //they should share f_pos of same file handler
+    for (int i = 0; i < MAX_FD; i++) {
+        child->fd_table[i] = parent->fd_table[i];
+
+        if (child->fd_table[i])//valid entry
+            vfs_file_increment_refcount(child->fd_table[i]);//handler refcount++;
+    }
+}
+//when task exit, clean up the fd table( might free the file handlers)
+void close_vfs_state(struct task_struct* task) {
+    if (!task)
+        return;
+
+    for (int i = 0; i < MAX_FD; i++) {
+        if (task->fd_table[i]) {
+            vfs_close(task->fd_table[i]);//decrement refcount of file handler, if no one use, free the file handler
+            task->fd_table[i] = 0;
+        }
+    }
+}
 
 struct task_struct *get_current(void) {
     //register: variable should live in a CPU register.
@@ -153,6 +201,8 @@ void thread_init(void) {
     //lab6
     INIT_LIST_HEAD(&boot_task.vm_regions);
     boot_task.mmap_next = USER_MMAP_BASE;
+    //lab7
+    init_vfs_state(&boot_task);
     add_to_all_tasks(&boot_task);
 
     // current task = boot_task
@@ -215,6 +265,7 @@ struct task_struct *kthread_create(void (*entry)(void)) {
     INIT_LIST_HEAD(&task->sibling_list);
     INIT_LIST_HEAD(&task->vm_regions);
     task->mmap_next = USER_MMAP_BASE;
+    init_vfs_state(task);
     //nr_threads, all_tasks_queue, and run_queue are shared scheduler state.
     flags = irq_save();
 
@@ -286,7 +337,7 @@ struct task_struct *uthread_create_empty(void)
     INIT_LIST_HEAD(&task->sibling_list);
     INIT_LIST_HEAD(&task->vm_regions);
     task->mmap_next = USER_MMAP_BASE;
-
+    init_vfs_state(task);
     flags = irq_save();
 
     task->pid = nr_threads++;
@@ -382,7 +433,7 @@ struct task_struct *uthread_create(unsigned long program_backing,///with demand 
     INIT_LIST_HEAD(&task->sibling_list);
     INIT_LIST_HEAD(&task->vm_regions);
     task->mmap_next = USER_MMAP_BASE;
-
+    init_vfs_state(task);
     //lab6 adv part 2
     if (add_user_region(task,
                     USER_CODE_BASE,
@@ -566,6 +617,7 @@ static void orphan_children(struct task_struct *parent) {
 static void free_task(struct task_struct *task) {
     if (!task)
         return;
+    close_vfs_state(task);
     orphan_children(task);
     if (!list_empty(&task->all_tasks_list)) {
         list_del(&task->all_tasks_list);
@@ -715,7 +767,7 @@ long process_stop(long pid) {
         }
     }
 
-    
+    close_vfs_state(target);
     //Mark target as zombie.
     //Do not free it here because parent may still waitpid() it,
     //and old timer callbacks may still hold its pointer.
@@ -750,6 +802,8 @@ void thread_exit_status(int status) {
 
     if (!current)
         return;
+
+    close_vfs_state(current);
 
     //Exiting changes child list, zombie list, state, and may wake parent.
     flags = irq_save();
@@ -829,7 +883,7 @@ void thread_exit(void) {
 
     if (!current)
         return;
-
+    close_vfs_state(current);
     flags = irq_save();
 
     //a thread cannot free its own stack while still running on it, so it mark itself as zombie and idle or parent will recycle

@@ -11,6 +11,7 @@
 #include "signal.h"
 #include "vm.h"
 #include "mmap.h"
+#include "vfs.h"
 
 #define SYS_GETPID     0
 #define SYS_UART_READ  1
@@ -26,6 +27,13 @@
 #define SYS_SIGRETURN 11
 #define SYS_KILL 12
 #define SYS_MMAP 13
+#define SYS_OPEN  14
+#define SYS_CLOSE 15
+#define SYS_READ  16
+#define SYS_WRITE 17
+#define SYS_MKDIR 18
+#define SYS_MOUNT 19
+#define SYS_CHDIR 20
 
 //helper to copy from user page in kernel mode
 //bit 18 in the RISC-V sstatus CSR: Supervisor User Memory access
@@ -98,6 +106,255 @@ static void put_user_char(char *user_ptr, char c)
     *user_ptr = c;
 
     user_access_end(old);
+}
+
+static int copy_from_user_buf(void* dst, const void* src, unsigned long len) {
+    unsigned long old;
+
+    if (!dst || !src)
+        return -1;
+
+    old = user_access_begin();
+    memcpy(dst, src, len);
+    user_access_end(old);
+
+    return 0;
+}
+
+static int copy_to_user_buf(void* dst, const void* src, unsigned long len) {
+    unsigned long old;
+
+    if (!dst || !src)
+        return -1;
+
+    old = user_access_begin();
+    memcpy(dst, src, len);
+    user_access_end(old);
+
+    return 0;
+}
+
+//find empty entry and write its value to file (register handler in fd table)
+static int fd_alloc(struct task_struct* task, struct file* file) {
+    if (!task || !file)
+        return -1;
+
+    for (int i = 0; i < MAX_FD; i++) {
+        if (!task->fd_table[i]) {
+            task->fd_table[i] = file;
+            return i;
+        }
+    }
+
+    return -1;
+}
+//use fd index to get the stored file handler
+static struct file* fd_get(struct task_struct* task, int fd) {
+    if (!task)
+        return 0;
+
+    if (fd < 0 || fd >= MAX_FD)
+        return 0;
+
+    return task->fd_table[fd];
+}
+//erase the entry to 0, and close the file (free handler on refcount == 1)
+static int fd_close(struct task_struct* task, int fd) {
+    struct file* file;
+
+    if (!task)
+        return -1;
+
+    if (fd < 0 || fd >= MAX_FD)
+        return -1;
+
+    file = task->fd_table[fd];
+    if (!file)
+        return -1;
+
+    task->fd_table[fd] = 0;
+
+    return vfs_close(file);//refcount-- and might free
+}
+
+static long sys_open_vfs(const char* user_path, int flags) {
+    char path[PATH_MAX];
+    struct file* file = 0;
+    struct task_struct* current = get_current();
+    int fd;
+
+    if (!current || current->type != TASK_USER)
+        return -1;
+
+    if (copy_string_from_user(path, user_path, sizeof(path)) < 0)
+        return -1;
+
+    if (vfs_open(path, flags, &file) != 0)//open might create a file, link the file to the vnode
+        return -1;
+
+    fd = fd_alloc(current, file);//add file to fd table of current task
+    if (fd < 0) {
+        vfs_close(file);
+        return -1;
+    }
+
+    return fd;
+}
+
+static long sys_close_vfs(int fd) {
+    struct task_struct* current = get_current();
+
+    if (!current || current->type != TASK_USER)
+        return -1;
+
+    return fd_close(current, fd);
+}
+
+static long sys_read_vfs(int fd, void* user_buf, unsigned long count) {
+    struct task_struct* current = get_current();
+    struct file* file;
+    char kbuf[512];
+    unsigned long done = 0;
+
+    if (!current || current->type != TASK_USER)
+        return -1;
+
+    if (!user_buf && count != 0)
+        return -1;
+
+    file = fd_get(current, fd);
+    if (!file)
+        return -1;
+
+    while (done < count) {//total bytes to read
+        unsigned long chunk = count - done;
+        int n;
+
+        if (chunk > sizeof(kbuf))
+            chunk = sizeof(kbuf);
+
+        n = vfs_read(file, kbuf, chunk);//handles offset internally, return read bytes
+        //on error, return partially read bytes, -1 if not read any
+        if (n < 0)
+            return done ? (long)done : -1;
+        //no data to read (exceeding EOF would return 0)
+        if (n == 0)
+            break;
+        //error from copy, return read bytes if any
+        if (copy_to_user_buf((char*)user_buf + done, kbuf, n) != 0)//copy to user buf with offset, write n bytes
+            return done ? (long)done : -1;
+
+        done += n;//move offset
+
+        if ((unsigned long)n < chunk)//short read, means encountered EOF, can return early
+            break;
+    }
+
+    return done;
+}
+
+static long sys_write_vfs(int fd, const void* user_buf, unsigned long count) {
+    struct task_struct* current = get_current();
+    struct file* file;
+    char kbuf[512];
+    unsigned long done = 0;
+
+    if (!current || current->type != TASK_USER)
+        return -1;
+
+    if (!user_buf && count != 0)
+        return -1;
+
+    file = fd_get(current, fd);
+    if (!file)
+        return -1;
+
+    while (done < count) {
+        unsigned long chunk = count - done;
+        int n;
+
+        if (chunk > sizeof(kbuf))
+            chunk = sizeof(kbuf);
+
+        if (copy_from_user_buf(kbuf, (const char*)user_buf + done, chunk) != 0)
+            return done ? (long)done : -1;
+
+        n = vfs_write(file, kbuf, chunk);
+        if (n < 0)
+            return done ? (long)done : -1;
+
+        if (n == 0)
+            break;
+
+        done += n;
+
+        if ((unsigned long)n < chunk)
+            break;
+    }
+
+    return done;
+}
+
+static long sys_mkdir_vfs(const char* user_path, unsigned mode) {
+    char path[PATH_MAX];
+    struct task_struct* current = get_current();
+
+    (void)mode;
+
+    if (!current || current->type != TASK_USER)
+        return -1;
+
+    if (copy_string_from_user(path, user_path, sizeof(path)) < 0)
+        return -1;
+
+    return vfs_mkdir(path);
+}
+
+static long sys_mount_vfs(const char* user_src,
+                          const char* user_target,
+                          const char* user_filesystem,
+                          unsigned long flags,
+                          const void* user_data) {
+    char target[PATH_MAX];
+    char filesystem[PATH_MAX];
+    struct task_struct* current = get_current();
+    //ignored
+    (void)user_src;
+    (void)flags;
+    (void)user_data;
+
+    if (!current || current->type != TASK_USER)
+        return -1;
+
+    if (copy_string_from_user(target, user_target, sizeof(target)) < 0)
+        return -1;
+
+    if (copy_string_from_user(filesystem, user_filesystem, sizeof(filesystem)) < 0)
+        return -1;
+
+    return vfs_mount(target, filesystem);
+}
+
+static long sys_chdir_vfs(const char* user_path) {
+    char path[PATH_MAX];
+    struct vnode* node = 0;
+    struct task_struct* current = get_current();
+
+    if (!current || current->type != TASK_USER)
+        return -1;
+
+    if (copy_string_from_user(path, user_path, sizeof(path)) < 0)
+        return -1;
+
+    if (vfs_lookup(path, &node) != 0)
+        return -1;
+
+    if (!vfs_is_dir(node))
+        return -1;
+
+    current->cwd = node;
+
+    return 0;
 }
 
 static void wake_sleeping_task(void *arg) {
@@ -376,6 +633,8 @@ void handle_syscall(struct pt_regs *regs) {
             return;
         }
 
+        inherit_vfs_state(child, parent);
+
         child_regs = (struct pt_regs *)child->thread.sp;
         
         //same sepc, user sp, general resigers
@@ -476,5 +735,30 @@ void handle_syscall(struct pt_regs *regs) {
             (int)regs->a2,
             (int)regs->a3
         );
+    }
+    else if (num == SYS_OPEN) {
+        regs->a0 = (int)sys_open_vfs((const char*)regs->a0,
+                                     (int)regs->a1);
+    } else if (num == SYS_CLOSE) {
+        regs->a0 = (int)sys_close_vfs((int)regs->a0);
+    } else if (num == SYS_READ) {
+        regs->a0 = (long)sys_read_vfs((int)regs->a0,
+                                      (void*)regs->a1,
+                                      (unsigned long)regs->a2);
+    } else if (num == SYS_WRITE) {
+        regs->a0 = (long)sys_write_vfs((int)regs->a0,
+                                       (const void*)regs->a1,
+                                       (unsigned long)regs->a2);
+    } else if (num == SYS_MKDIR) {
+        regs->a0 = (int)sys_mkdir_vfs((const char*)regs->a0,
+                                      (unsigned)regs->a1);
+    } else if (num == SYS_MOUNT) {
+        regs->a0 = (int)sys_mount_vfs((const char*)regs->a0,
+                                      (const char*)regs->a1,
+                                      (const char*)regs->a2,
+                                      (unsigned long)regs->a3,
+                                      (const void*)regs->a4);
+    } else if (num == SYS_CHDIR) {
+        regs->a0 = (int)sys_chdir_vfs((const char*)regs->a0);
     }
 }

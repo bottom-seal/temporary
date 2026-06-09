@@ -16,10 +16,13 @@ struct vnode_operations;
 struct file_operations;
 
 struct vnode {
-    struct mount* mount;
+    struct mount* mount;//the vnode with something mounted should have this, go down to mounted fs
     struct vnode_operations* v_ops;
     struct file_operations* f_ops;
     void* internal;
+    //part 3
+    struct vnode* parent;//parent dir for ..
+    struct mount* mounted_by;//mounted root should have this, point back to mount point .. should go back to parent of mount point
 };
 
 struct file {
@@ -32,8 +35,10 @@ struct file {
 };
 
 struct mount {
-    struct vnode* root;
+    struct vnode* root;//records root vnode (down)
     struct filesystem* fs;
+
+    struct vnode* mountpoint;//records the vnode with mount field pointing to this struct mount
 };
 
 struct filesystem {
@@ -73,6 +78,8 @@ int vfs_write(struct file* file, const void* buf, size_t len);
 int vfs_lookup(const char* pathname, struct vnode** target);
 int vfs_mkdir(const char* pathname);
 int vfs_mount(const char* target, const char* filesystem);
+int vfs_is_dir(struct vnode* node);
+void vfs_file_increment_refcount(struct file* file);
 
 int tmpfs_setup_mount(struct filesystem* fs, struct mount* mnt);
 int tmpfs_open(struct vnode* file_node, struct file** target);
@@ -85,9 +92,6 @@ int tmpfs_lookup(struct vnode* dir_node,
 int tmpfs_create(struct vnode* dir_node,
                  struct vnode** target,
                  const char* component_name);
-int tmpfs_mkdir(struct vnode* dir_node,
-                struct vnode** target,
-                const char* component_name);
 int tmpfs_mkdir(struct vnode* dir_node,
                 struct vnode** target,
                 const char* component_name);

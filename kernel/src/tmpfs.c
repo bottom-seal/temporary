@@ -56,6 +56,8 @@ struct vnode* tmpfs_create_vnode(enum fsnode_type type) {
     vnode->v_ops = &tmpfs_vnode_ops;
     vnode->f_ops = &tmpfs_file_ops;
     vnode->internal = inode;
+    vnode->parent = 0;
+    vnode->mounted_by = 0;
 
     return vnode;
 }
@@ -64,13 +66,14 @@ struct vnode* tmpfs_create_vnode(enum fsnode_type type) {
 int tmpfs_setup_mount(struct filesystem* fs, struct mount* mnt) {
     if (!fs || !mnt)
         return -1;
-
-    mnt->root = tmpfs_create_vnode(FS_DIR);
+    //allocate new vnode as root dir for new mounted fs
+    mnt->root = tmpfs_create_vnode(FS_DIR);//root directory vnode of this tmpfs instance
     if (!mnt->root)
         return -1;
 
     mnt->fs = fs;
-
+    mnt->root->parent = mnt->root;//root dir's parent is itself, prevent going above root
+    mnt->root->mounted_by = mnt;//when path lookup on .. , it can find the struct mount, and check it to see mountpoint field
     return 0;
 }
 
@@ -223,7 +226,7 @@ static int tmpfs_create_child(struct vnode* dir_node,
     //check inode is dir type
     if (!dir || dir->type != FS_DIR)
         return -1;
-
+                                
     //reject duplicate filename/dirname
     for (int i = 0; i < TMPFS_MAX_DIR_ENTRY; i++) {
         if (!dir->entry[i])//good: no duplicate for all valid entry
@@ -242,9 +245,9 @@ static int tmpfs_create_child(struct vnode* dir_node,
             struct vnode* new_vnode = tmpfs_create_vnode(type);//vnode links to an inode
             if (!new_vnode)
                 return -1;
-
+            new_vnode->parent = dir_node;
             struct tmpfs_vnode* new_inode = new_vnode->internal;
-
+            
             //modify inode's name
             for (int j = 0; j < TMPFS_MAX_FILE_NAME - 1; j++) {
                 new_inode->name[j] = component_name[j];
@@ -280,6 +283,7 @@ int tmpfs_mkdir(struct vnode* dir_node,
     return tmpfs_create_child(dir_node, target, component_name, FS_DIR);
 }
 
+//check if a vnode (->inode) is DIR type
 int tmpfs_is_dir(struct vnode* node) {
     if (!node || !node->internal)
         return 0;
