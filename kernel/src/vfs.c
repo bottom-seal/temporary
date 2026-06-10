@@ -4,6 +4,7 @@
 #include "thread.h"
 struct mount* rootfs;//root file system
 struct filesystem fs_list[MAX_FS];//registered file systems
+static struct device dev_table[MAX_DEV];//records all device known, device has name and f_ops it use
 
 static struct filesystem tmpfs = {
     .name = "tmpfs",
@@ -214,6 +215,7 @@ void vfs_file_increment_refcount(struct file* file) {
 
 void vfs_init(void) {
     int tmpfs_idx = register_filesystem(&tmpfs);
+    int uart_dev_id;
 
     if (tmpfs_idx < 0)
         return;
@@ -229,6 +231,22 @@ void vfs_init(void) {
     memset(rootfs, 0, sizeof(struct mount));
 
     fs_list[tmpfs_idx].setup_mount(&fs_list[tmpfs_idx], rootfs);
+
+    /*
+     * Advanced Part 1:
+     * /dev is a tmpfs directory.
+     * /dev/uart is a tmpfs device node.
+     */
+    uart_dev_id = uartdev_init();//register uart in device table, return device table index
+    if (uart_dev_id < 0)
+        return;
+
+    if (vfs_mkdir("/dev") != 0)
+        return;
+    //create a device vnode at pathname, id is returned index from register, open use this id to get device f_ops
+    if (vfs_mknod("/dev/uart", uart_dev_id) != 0)
+        return;
+
 
     /*
      * Part 4:
@@ -299,13 +317,23 @@ int vfs_open(const char* pathname, int flags, struct file** target) {
     while (vnode->mount)
         vnode = vnode->mount->root;
 
+    //default use vnode's f_ops ,if it is a device, use device f_ops instead
+    struct file_operations* f_ops = vnode->f_ops;
+    int dev_id;
+
     //do not open directory as regular file
     if (vfs_is_dir(vnode))
         return -1;
 
-    if (!vnode->f_ops || !vnode->f_ops->open)
-        return -1;
+    //if vnode is device node, use the f_ops stored in device struct
+    if (vnode->v_ops &&
+        vnode->v_ops->get_dev_id &&
+        vnode->v_ops->get_dev_id(vnode, &dev_id) == 0) {
+        f_ops = get_device_fops(dev_id);
+    }
 
+    if (!f_ops || !f_ops->open)
+        return -1;
     //allocate handler
     *target = allocate(sizeof(struct file));
     if (!(*target))
@@ -314,7 +342,7 @@ int vfs_open(const char* pathname, int flags, struct file** target) {
     (*target)->flags = flags;
     (*target)->refcount = 1;//cause new handler
 
-    if (vnode->f_ops->open(vnode, target) != 0) {//init handler, link to vnode of the file
+    if (f_ops->open(vnode, target) != 0) {//init handler, link to vnode of the file
         free(*target);
         *target = 0;
         return -1;
@@ -389,6 +417,39 @@ int vfs_mkdir(const char* pathname) {
 
     return 0;
 }
+//create a device vnode at pathname
+int vfs_mknod(const char* pathname, int dev_id) {
+    struct vnode* vnode = 0;
+    struct vnode* parent = 0;
+    char name[PATH_MAX];
+
+    if (!pathname)
+        return -1;
+
+    if (dev_id <= 0 || !get_device_fops(dev_id))
+        return -1;
+
+    //check for duplicate
+    if (vfs_lookup(pathname, &vnode) == 0)
+        return -1;
+    //check dir path exist
+    if (resolve_parent(pathname, &parent, name) != 0)
+        return -1;
+
+    //if parent is mount point, create in mount root
+    while (parent && parent->mount)
+        parent = parent->mount->root;
+    //check is dir
+    if (!parent->v_ops || !parent->v_ops->is_dir || !parent->v_ops->is_dir(parent))
+        return -1;
+    //parent has mknod
+    if (!parent->v_ops->mknod)
+        return -1;
+    
+    return parent->v_ops->mknod(parent, &vnode, name, dev_id);//create under dir node, a vnode with name and dev_id 
+}
+
+
 //some design choice: for VFS API, user doesn't know pointer to vnode or filesystem, so it takes string and does conversion internally
 //takes existing dir node, modify mount field to a mount struct
 int vfs_mount(const char* target, const char* filesystem) {
@@ -452,4 +513,28 @@ int vfs_mount(const char* target, const char* filesystem) {
     vnode->mount = new_mount;
 
     return 0;
+}
+
+
+int register_device(const char* name, struct file_operations* f_ops) {
+    if (!name || !f_ops)
+        return -1;
+    //find one empty entry, register device with name, f_ops
+    for (int i = 1; i < MAX_DEV; i++) {
+        if (!dev_table[i].name) {
+            dev_table[i].name = name;
+            dev_table[i].f_ops = f_ops;
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+//given device id, get device f_ops
+struct file_operations* get_device_fops(int dev_id) {
+    if (dev_id <= 0 || dev_id >= MAX_DEV)
+        return 0;
+
+    return dev_table[dev_id].f_ops;
 }

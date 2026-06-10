@@ -36,6 +36,26 @@ static void init_vfs_state(struct task_struct* task) {
     for (int i = 0; i < MAX_FD; i++)
         task->fd_table[i] = 0;
 }
+
+int open_stdio_for_task(struct task_struct* task) {
+    if (!task)
+        return -1;
+    //all dev/uart for input, output, error
+    for (int fd = 0; fd < 3; fd++) {
+        struct file* file = 0;
+        //if taken
+        if (task->fd_table[fd])
+            continue;
+        //open gets a file handler linking to the path's vnode
+        if (vfs_open("/dev/uart", 0, &file) != 0)
+            return -1;
+
+        task->fd_table[fd] = file;//file object records f_ops
+    }
+
+    return 0;
+}
+
 //when fork, child should get parent's vfs states (init child)
 void inherit_vfs_state(struct task_struct* child, struct task_struct* parent) {
     //no child, no init
@@ -466,6 +486,16 @@ struct task_struct *uthread_create(unsigned long program_backing,///with demand 
         return 0;
     }
 
+    //check if fd table device init success
+    if (open_stdio_for_task(task) != 0) {
+        close_vfs_state(task);
+        free_mmap_regions(task);
+        free_user_pgd(task->pgd);
+        free((void *)task->kernel_stack_base);
+        free(image);
+        free(task);
+        return 0;
+    }
 
     //nr_threads, all_tasks_queue, and parent's child_list are shared task state.
     flags = irq_save();

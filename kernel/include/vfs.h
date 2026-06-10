@@ -3,6 +3,7 @@
 
 #include "types.h"
 
+#define MAX_DEV 16
 #define MAX_FS   16
 #define MAX_FD   16
 #define PATH_MAX 255
@@ -46,6 +47,11 @@ struct filesystem {
     int (*setup_mount)(struct filesystem* fs, struct mount* mount);
 };
 
+struct device {
+    const char* name;
+    struct file_operations* f_ops;
+};
+
 struct file_operations {
     int (*open)(struct vnode* file_node, struct file** target);
     int (*close)(struct file* file);
@@ -63,11 +69,18 @@ struct vnode_operations {
     int (*mkdir)(struct vnode* dir_node,
                  struct vnode** target,
                  const char* component_name);
+    int (*mknod)(struct vnode* dir_node,
+                 struct vnode** target,
+                 const char* component_name,
+                 int dev_id);
+
     int (*is_dir)(struct vnode* node);
+
+    int (*get_dev_id)(struct vnode* node, int* dev_id);
 };
 
 extern struct mount* rootfs;
-
+struct task_struct;//forward declaration, okay if just use pointer (size known)
 void vfs_init(void);
 
 int register_filesystem(struct filesystem* fs);
@@ -98,4 +111,23 @@ int tmpfs_mkdir(struct vnode* dir_node,
 int tmpfs_is_dir(struct vnode* node);
 
 int ramfs_setup_mount(struct filesystem* fs, struct mount* mnt);
+
+
+//for advance part
+int register_device(const char* name, struct file_operations* f_ops);
+struct file_operations* get_device_fops(int dev_id);
+
+int vfs_mknod(const char* pathname, int dev_id);
+
+int tmpfs_mknod(struct vnode* dir_node,
+                struct vnode** target,
+                const char* component_name,
+                int dev_id);
+
+int tmpfs_get_dev_id(struct vnode* node, int* dev_id);
+
+int uartdev_init(void);
+
+int open_stdio_for_task(struct task_struct* task);
+
 #endif

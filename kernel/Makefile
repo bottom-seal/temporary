@@ -34,7 +34,8 @@ SRCS = \
 	src/vfs.c \
  	src/tmpfs.c \
 	src/vfs_test.c \
-	src/ramfs.c
+	src/ramfs.c \
+	src/uartdev.c
 
 OBJS = $(SRCS:.c=.o)
 OBJS := $(OBJS:.S=.o)

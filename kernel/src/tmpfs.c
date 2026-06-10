@@ -6,7 +6,7 @@
 #define TMPFS_MAX_DIR_ENTRY 16
 #define TMPFS_MAX_FILE_SIZE 4096
 
-enum fsnode_type { FS_DIR, FS_FILE };
+enum fsnode_type { FS_DIR, FS_FILE, FS_DEVICE };
 
 // internal data structure representing an inode exclusively for the tmpfs
 struct tmpfs_vnode {
@@ -15,6 +15,7 @@ struct tmpfs_vnode {
     struct vnode* entry[TMPFS_MAX_DIR_ENTRY];//if this tmpfs_vnode is a directory, entry[] stores its children (vnodes)
     char* data;//mem addr
     size_t size;//mem size
+    int dev_id;
 };
 
 //The table stores function addresses, so later code can call functions indirectly through the table
@@ -30,7 +31,9 @@ struct vnode_operations tmpfs_vnode_ops = {
     .lookup = tmpfs_lookup,
     .create = tmpfs_create,
     .mkdir = tmpfs_mkdir,
-    .is_dir = tmpfs_is_dir
+    .mknod = tmpfs_mknod,
+    .is_dir = tmpfs_is_dir,
+    .get_dev_id = tmpfs_get_dev_id
 };
 
 //Allocate and fully initialize one inode, init VFS vnode too so it can point to FS vnode
@@ -52,6 +55,7 @@ struct vnode* tmpfs_create_vnode(enum fsnode_type type) {
     inode->type = type;
     inode->data = 0;
     inode->size = 0;
+    inode->dev_id = -1;
 
     vnode->mount = 0;
     vnode->v_ops = &tmpfs_vnode_ops;
@@ -292,4 +296,73 @@ int tmpfs_is_dir(struct vnode* node) {
     struct tmpfs_vnode* inode = node->internal;
 
     return inode->type == FS_DIR;
+}
+
+//advance
+//create under dir node, a vnode with name and dev_id 
+int tmpfs_mknod(struct vnode* dir_node,
+                struct vnode** target,
+                const char* component_name,
+                int dev_id) {
+    struct tmpfs_vnode* dir;
+    struct vnode* vnode;
+    struct tmpfs_vnode* inode;
+
+    if (!dir_node || !target || !component_name)
+        return -1;
+
+    dir = dir_node->internal;
+
+    if (!dir || dir->type != FS_DIR)
+        return -1;
+
+    if (strlen(component_name) >= TMPFS_MAX_FILE_NAME)
+        return -1;
+
+    //check for duplicate under same dir
+    for (int i = 0; i < TMPFS_MAX_DIR_ENTRY; i++) {
+        if (dir->entry[i]) {
+            struct tmpfs_vnode* child = dir->entry[i]->internal;
+
+            if (child && strcmp(child->name, component_name) == 0)
+                return -1;
+        }
+    }
+    //create  vnode (and corresponding device inode)
+    vnode = tmpfs_create_vnode(FS_DEVICE);
+    if (!vnode)
+        return -1;
+
+    inode = vnode->internal;
+    strcpy(inode->name, component_name);
+    inode->dev_id = dev_id;
+
+    vnode->parent = dir_node;
+    //register in parent entry
+    for (int i = 0; i < TMPFS_MAX_DIR_ENTRY; i++) {
+        if (!dir->entry[i]) {
+            dir->entry[i] = vnode;
+            *target = vnode;
+            return 0;
+        }
+    }
+    //fail to register path
+    free(inode);
+    free(vnode);
+    return -1;
+}
+//get vnode->inode's device id
+int tmpfs_get_dev_id(struct vnode* node, int* dev_id) {
+    struct tmpfs_vnode* inode;
+
+    if (!node || !node->internal || !dev_id)
+        return -1;
+
+    inode = node->internal;
+
+    if (inode->type != FS_DEVICE)
+        return -1;
+
+    *dev_id = inode->dev_id;
+    return 0;
 }
