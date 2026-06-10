@@ -24,7 +24,9 @@ struct file_operations tmpfs_file_ops = {
     .open = tmpfs_open,
     .close = tmpfs_close,
     .read = tmpfs_read,
-    .write = tmpfs_write
+    .write = tmpfs_write,
+    .lseek64 = tmpfs_lseek64,
+    .ioctl = 0,
 };
 
 struct vnode_operations tmpfs_vnode_ops = {
@@ -365,4 +367,23 @@ int tmpfs_get_dev_id(struct vnode* node, int* dev_id) {
 
     *dev_id = inode->dev_id;
     return 0;
+}
+
+//tmpfs also support lseek64 changing offset, no info so no ioctl
+long tmpfs_lseek64(struct file* file, long offset, int whence) {
+    if (!file)
+        return -1;
+
+    if (whence != SEEK_SET)
+        return -1;
+
+    if (offset < 0)
+        return -1;
+
+    if ((size_t)offset > TMPFS_MAX_FILE_SIZE)
+        return -1;
+
+    file->f_pos = (size_t)offset;
+
+    return offset;
 }

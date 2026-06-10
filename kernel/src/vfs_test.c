@@ -254,4 +254,84 @@ void test_vfs_basic2(void) {
     vfs_close(f);
 
     uart_puts("[PASS] basic2 mkdir/path/mount\n");
+    // ==========================================
+// Advanced Part 2: /dev/fb VFS Test
+// ==========================================
+
+struct file* fb_file = 0;
+
+int open_res = vfs_open("/dev/fb", 0, &fb_file);
+
+uart_puts((open_res == 0 && fb_file != 0)
+              ? "FB Test 1 passed (open /dev/fb)\n"
+              : "FB Test 1 failed\n");
+
+if (fb_file) {
+    struct {
+        unsigned int width;
+        unsigned int height;
+        unsigned int bpp;
+    } fb_info;
+
+    fb_info.width = 0;
+    fb_info.height = 0;
+    fb_info.bpp = 0;
+
+    // ioctl request 0: get framebuffer info
+    int ioctl_res = vfs_ioctl(fb_file, 0, &fb_info);
+
+    uart_puts((ioctl_res == 0 &&
+               fb_info.width > 0 &&
+               fb_info.height > 0 &&
+               fb_info.bpp > 0)
+                  ? "FB Test 2 passed (ioctl get info)\n"
+                  : "FB Test 2 failed\n");
+
+    // /dev/fb should be write-only
+    char read_buf[4];
+    int read_res = vfs_read(fb_file, read_buf, sizeof(read_buf));
+
+    uart_puts((read_res < 0)
+                  ? "FB Test 3 passed (read rejected)\n"
+                  : "FB Test 3 failed\n");
+
+    // SEEK_SET is just 0 in this lab
+    long seek_res = vfs_lseek64(fb_file, 0, 0);
+
+    uart_puts((seek_res == 0)
+                  ? "FB Test 4 passed (lseek64 to 0)\n"
+                  : "FB Test 4 failed\n");
+
+    if (fb_info.bpp > 0) {
+        unsigned int color = 0x00ff0000;
+
+        int write_res = vfs_write(fb_file, &color, fb_info.bpp);
+
+        uart_puts((write_res == (int)fb_info.bpp)
+                      ? "FB Test 5 passed (write one pixel)\n"
+                      : "FB Test 5 failed\n");
+
+        seek_res = vfs_lseek64(fb_file, fb_info.bpp * 100, 0);
+        write_res = vfs_write(fb_file, &color, fb_info.bpp);
+
+        uart_puts((seek_res == (long)(fb_info.bpp * 100) &&
+                   write_res == (int)fb_info.bpp)
+                      ? "FB Test 6 passed (seek then write)\n"
+                      : "FB Test 6 failed\n");
+    }
+
+    seek_res = vfs_lseek64(fb_file, -1, 0);
+
+    uart_puts((seek_res < 0)
+                  ? "FB Test 7 passed (negative seek rejected)\n"
+                  : "FB Test 7 failed\n");
+
+    ioctl_res = vfs_ioctl(fb_file, 999, &fb_info);
+
+    uart_puts((ioctl_res < 0)
+                  ? "FB Test 8 passed (bad ioctl rejected)\n"
+                  : "FB Test 8 failed\n");
+
+    vfs_close(fb_file);
+}
 }

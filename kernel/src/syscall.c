@@ -34,7 +34,8 @@
 #define SYS_MKDIR 18
 #define SYS_MOUNT 19
 #define SYS_CHDIR 20
-
+#define SYS_LSEEK64 21
+#define SYS_IOCTL 22
 //helper to copy from user page in kernel mode
 //bit 18 in the RISC-V sstatus CSR: Supervisor User Memory access
 //protects kernel from accidently dereferencing a user pointer, turning SUM up enables accessing temporary
@@ -355,6 +356,53 @@ static long sys_chdir_vfs(const char* user_path) {
     current->cwd = node;
 
     return 0;
+}
+
+static long sys_lseek64_vfs(int fd, long offset, int whence) {
+    struct task_struct* current = get_current();
+    struct file* file;
+
+    if (!current || current->type != TASK_USER)
+        return -1;
+
+    file = fd_get(current, fd);
+
+    if (!file)
+        return -1;
+
+    return vfs_lseek64(file, offset, whence);//sets offset if inode has the method
+}
+
+static long sys_ioctl_vfs(int fd, unsigned long request, void* user_arg) {
+    struct task_struct* current = get_current();
+    struct file* file;
+    struct framebuffer_info info;
+    int ret;
+
+    if (!current || current->type != TASK_USER)
+        return -1;
+
+    if (!user_arg)
+        return -1;
+
+    file = fd_get(current, fd);
+
+    if (!file)
+        return -1;
+
+    //only allows fb
+    if (request != FB_IOCTL_GET_INFO)
+        return -1;
+    //write to kernel memory struct info
+    ret = vfs_ioctl(file, request, &info);
+
+    if (ret < 0)
+        return -1;
+    //copy the struct to user
+    if (copy_to_user_buf(user_arg, &info, sizeof(info)) < 0)
+        return -1;
+
+    return ret;
 }
 
 static void wake_sleeping_task(void *arg) {
@@ -760,5 +808,14 @@ void handle_syscall(struct pt_regs *regs) {
                                       (const void*)regs->a4);
     } else if (num == SYS_CHDIR) {
         regs->a0 = (int)sys_chdir_vfs((const char*)regs->a0);
-    }
+    } else if (num == SYS_LSEEK64) {
+        regs->a0 = sys_lseek64_vfs((int)regs->a0,
+                                (long)regs->a1,
+                                (int)regs->a2);
+    } else if (num == SYS_IOCTL) {
+        regs->a0 = sys_ioctl_vfs((int)regs->a0,
+                                (unsigned long)regs->a1,
+                                (void*)regs->a2);
+}
+    
 }

@@ -9,6 +9,8 @@
 #define PATH_MAX 255
 #define O_CREAT 00000100
 
+#define SEEK_SET 0
+
 struct mount;
 struct filesystem;
 struct vnode;
@@ -57,6 +59,9 @@ struct file_operations {
     int (*close)(struct file* file);
     int (*read)(struct file* file, void* buf, size_t len);
     int (*write)(struct file* file, const void* buf, size_t len);
+
+    long (*lseek64)(struct file* file, long offset, int whence);
+    int (*ioctl)(struct file* file, unsigned long request, void* arg);
 };
 
 struct vnode_operations {
@@ -111,7 +116,7 @@ int tmpfs_mkdir(struct vnode* dir_node,
 int tmpfs_is_dir(struct vnode* node);
 
 int ramfs_setup_mount(struct filesystem* fs, struct mount* mnt);
-
+long tmpfs_lseek64(struct file* file, long offset, int whence);
 
 //for advance part
 int register_device(const char* name, struct file_operations* f_ops);
@@ -129,5 +134,11 @@ int tmpfs_get_dev_id(struct vnode* node, int* dev_id);
 int uartdev_init(void);
 
 int open_stdio_for_task(struct task_struct* task);
+
+//part 2
+long vfs_lseek64(struct file* file, long offset, int whence);
+int vfs_ioctl(struct file* file, unsigned long request, void* arg);
+
+int fbdev_init(void);
 
 #endif

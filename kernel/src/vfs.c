@@ -216,7 +216,7 @@ void vfs_file_increment_refcount(struct file* file) {
 void vfs_init(void) {
     int tmpfs_idx = register_filesystem(&tmpfs);
     int uart_dev_id;
-
+    int fb_dev_id;
     if (tmpfs_idx < 0)
         return;
 
@@ -232,28 +232,23 @@ void vfs_init(void) {
 
     fs_list[tmpfs_idx].setup_mount(&fs_list[tmpfs_idx], rootfs);
 
-    /*
-     * Advanced Part 1:
-     * /dev is a tmpfs directory.
-     * /dev/uart is a tmpfs device node.
-     */
+    //get idx in device table
     uart_dev_id = uartdev_init();//register uart in device table, return device table index
-    if (uart_dev_id < 0)
+    fb_dev_id = fbdev_init();
+
+    if (uart_dev_id < 0 || fb_dev_id < 0)
         return;
 
     if (vfs_mkdir("/dev") != 0)
         return;
-    //create a device vnode at pathname, id is returned index from register, open use this id to get device f_ops
+
+    //create device vnodes using the IDs returned by register_device()
     if (vfs_mknod("/dev/uart", uart_dev_id) != 0)
         return;
 
-
-    /*
-     * Part 4:
-     * rootfs is tmpfs.
-     * Create /ramfs inside tmpfs.
-     * Then mount read-only ramfs there.
-     */
+    if (vfs_mknod("/dev/fb", fb_dev_id) != 0)
+        return;
+    //mount ramfs file system in /ramfs
     if (vfs_mkdir("/ramfs") != 0)//created under root of tmpfs
         return;
 
@@ -537,4 +532,18 @@ struct file_operations* get_device_fops(int dev_id) {
         return 0;
 
     return dev_table[dev_id].f_ops;
+}
+//just check input and call underlying func
+long vfs_lseek64(struct file* file, long offset, int whence) {
+    if (!file || !file->f_ops || !file->f_ops->lseek64)
+        return -1;
+
+    return file->f_ops->lseek64(file, offset, whence);
+}
+//tmpfs/uart/ramfs would fail this
+int vfs_ioctl(struct file* file, unsigned long request, void* arg) {
+    if (!file || !file->f_ops || !file->f_ops->ioctl)
+        return -1;
+
+    return file->f_ops->ioctl(file, request, arg);
 }
