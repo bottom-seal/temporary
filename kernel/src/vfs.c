@@ -9,6 +9,10 @@ static struct filesystem tmpfs = {
     .name = "tmpfs",
     .setup_mount = tmpfs_setup_mount,//this func assigns fs field, allocate inode (and vnode) as DIR for root
 };
+static struct filesystem ramfs = {
+    .name = "ramfs",
+    .setup_mount = ramfs_setup_mount,
+};
 //given a path, return the node it point to through target
 static int resolve_path(const char* path,
                         struct vnode** target,
@@ -209,18 +213,34 @@ void vfs_file_increment_refcount(struct file* file) {
 }
 
 void vfs_init(void) {
-    int idx = register_filesystem(&tmpfs);
-    if (idx < 0)
+    int tmpfs_idx = register_filesystem(&tmpfs);
+
+    if (tmpfs_idx < 0)
+        return;
+
+    if (register_filesystem(&ramfs) < 0)
         return;
 
     rootfs = allocate(sizeof(struct mount));
+
     if (!rootfs)
         return;
 
     memset(rootfs, 0, sizeof(struct mount));
 
-    fs_list[idx].setup_mount(&fs_list[idx], rootfs);//calls tmpfs_setup_mount(&fs_list[idx], rootfs)
-    //rootfs (struct mount) now has fields point to filesystem tmpfs, and vnode to the root DIR type vnode
+    fs_list[tmpfs_idx].setup_mount(&fs_list[tmpfs_idx], rootfs);
+
+    /*
+     * Part 4:
+     * rootfs is tmpfs.
+     * Create /ramfs inside tmpfs.
+     * Then mount read-only ramfs there.
+     */
+    if (vfs_mkdir("/ramfs") != 0)//created under root of tmpfs
+        return;
+
+    if (vfs_mount("/ramfs", "ramfs") != 0)//vfs_mount also calls setup_mount for ramfs
+        return;
 }
 
 //find an empty entry in fs_list, and record new fs (only record, no mount)

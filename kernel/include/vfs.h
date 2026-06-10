@@ -97,4 +97,5 @@ int tmpfs_mkdir(struct vnode* dir_node,
                 const char* component_name);
 int tmpfs_is_dir(struct vnode* node);
 
+int ramfs_setup_mount(struct filesystem* fs, struct mount* mnt);
 #endif

@@ -34,6 +34,7 @@ struct vnode_operations tmpfs_vnode_ops = {
 };
 
 //Allocate and fully initialize one inode, init VFS vnode too so it can point to FS vnode
+//name assigned in tmpfs_create_child()
 struct vnode* tmpfs_create_vnode(enum fsnode_type type) {
     struct vnode* vnode = allocate(sizeof(struct vnode));
     if (!vnode)
